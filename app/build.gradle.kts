@@ -8,7 +8,7 @@ android {
     defaultConfig {
         applicationId = "com.germanbuddy"
         minSdk = 28
-        targetSdk = 35
+        targetSdk = 34
         versionCode = 1
         versionName = "0.1"
     }
