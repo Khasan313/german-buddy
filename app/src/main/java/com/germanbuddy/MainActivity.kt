@@ -60,7 +60,9 @@ class MainActivity : Activity() {
     private fun systemFor(l: Int) =
         "Du bist ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. ${levelRules[l]} " +
         "Antworte immer genau in diesen zwei Zeilen. " +
-        "Zeile 1: 'Korrektur: ' und dann der Satz des Lernenden korrekt geschrieben (war er schon richtig, schreibe 'Korrektur: Richtig!'). " +
+        "Zeile 1: 'Korrektur: ' und dann NUR der Satz des Lernenden korrekt geschrieben. " +
+        "Aendere nie einen Satz, der schon richtig ist: dann schreibe genau 'Korrektur: Richtig!'. " +
+        "Pruefe bei jedem Satz: Verb an zweiter Stelle im Hauptsatz, Artikel und Kasus, Konjugation, haben oder sein im Perfekt, Rechtschreibung. " +
         "Zeile 2: 'Antwort: ' und dann hoechstens zwei kurze Saetze auf dem Niveau des Lernenden, am Ende eine einfache Frage."
 
     private val audioPrompt = "Aufnahme des Lernenden. Schreibe zuerst die Zeile 'Verstanden: ' mit dem woertlichen Text der Aufnahme, " +
@@ -200,7 +202,7 @@ class MainActivity : Activity() {
         return e.createConversation(ConversationConfig(
             systemInstruction = Contents.of(systemFor(level)),
             initialMessages = initial,
-            samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.7),
+            samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.3),
             thinkingConfig = ThinkingConfig(enableThinking = false),
             maxOutputToken = 300))
     }
@@ -260,6 +262,29 @@ class MainActivity : Activity() {
         return ""
     }
 
+
+    // ---------- Pruefung der Korrektur durch die App ----------
+    private fun words(t: String, ignoreCase: Boolean): List<String> {
+        val x = if (ignoreCase) t.lowercase() else t
+        return x.replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().split(" ").filter { it.isNotBlank() }
+    }
+
+    private fun marker(orig: String, reply: String, speech: Boolean): String {
+        val line = reply.lines().firstOrNull { it.trim().startsWith("Korrektur:") } ?: return ""
+        val corr = line.substringAfter("Korrektur:").trim()
+        val low = corr.lowercase()
+        if (low.startsWith("richtig") || low.startsWith("korrekt")) return "[Modell: richtig]\n"
+        val a = words(orig, speech)
+        val b = words(corr, speech)
+        if (a == b) return "[OK: keine Aenderung]\n"
+        val removed = a.toMutableList().also { l -> b.forEach { l.remove(it) } }
+        val added = b.toMutableList().also { l -> a.forEach { l.remove(it) } }
+        if (removed.isEmpty() && added.isEmpty()) return "[Aenderung: nur Wortstellung]\n"
+        val r = if (removed.isEmpty()) "-" else removed.joinToString(" ")
+        val n = if (added.isEmpty()) "-" else added.joinToString(" ")
+        return "[Aenderung: $r  ->  $n]\n"
+    }
+
     // ---------- Schreiben ----------
     private fun sendText() {
         val text = input.text.toString().trim()
@@ -271,6 +296,7 @@ class MainActivity : Activity() {
             append("\nDu: $text\nBuddy: ")
             val reply = ask(Contents.of(text))
             append("\n")
+            append(marker(text, reply, false))
             remember(text, reply)
             saveState()
             setBusy(false)
@@ -317,6 +343,7 @@ class MainActivity : Activity() {
             val lines = reply.lines()
             val heard = lines.firstOrNull { it.trim().startsWith("Verstanden:") }
                 ?.substringAfter("Verstanden:")?.trim().orEmpty().ifBlank { "(Sprachnachricht)" }
+            append(marker(heard, reply, true))
             remember(heard, lines.filterNot { it.trim().startsWith("Verstanden:") }.joinToString("\n"))
             saveState()
             setBusy(false)
