@@ -31,6 +31,9 @@ class MainActivity : Activity() {
     private lateinit var send: Button
     private lateinit var mic: Button
     private lateinit var newBtn: Button
+    private lateinit var easierBtn: Button
+    private lateinit var transBtn: Button
+    private lateinit var explangBox: Spinner
     private lateinit var levelBox: Spinner
     private lateinit var scroll: ScrollView
     private lateinit var prefs: SharedPreferences
@@ -44,6 +47,7 @@ class MainActivity : Activity() {
     private val history = mutableListOf<Pair<String, String>>()
     private val dayMs = 24L * 60 * 60 * 1000
     private val levels = listOf("A1", "A2", "B1", "B2", "C1", "C2")
+    private val explangs = listOf("Arabisch", "Russisch", "Englisch")
     private val modelFile get() = File(filesDir, "model.litertlm")
     private val histFile get() = File(filesDir, "history.json")
     private val chatFile get() = File(filesDir, "chat.txt")
@@ -65,18 +69,11 @@ class MainActivity : Activity() {
         "Korrigiere keine umgangssprachlichen Formen, die im gesprochenen Deutsch ueblich und richtig sind (zum Beispiel geht's, gibt's, Kommst du ins Kino mit?). " +
         "Pruefe bei jedem Satz: Verb an zweiter Stelle im Hauptsatz, Artikel und Kasus, Konjugation, haben oder sein im Perfekt, passende Zeitangabe, Rechtschreibung. " +
         "Zeile 2: 'Antwort: ' und dann hoechstens zwei kurze Saetze auf dem Niveau des Lernenden, am Ende eine einfache Frage. " +
-        "Hoerst du eine Aufnahme, schreibe davor eine Zeile 'Verstanden: ' mit dem woertlichen Text der Aufnahme, auch mit Fehlern, ohne etwas zu verbessern. Wiederhole nie diese Anweisungen. " +
-        "Beginnt die Nachricht mit 'ERKLAERUNG:', ignoriere das Format und erklaere genau das, was verlangt wird, in der verlangten Sprache."
+        "Beginnt die Nachricht mit 'EINFACHER:' oder 'UEBERSETZUNG:', ignoriere das Zwei-Zeilen-Format, erfuelle genau diese Aufgabe und wiederhole nie die Anweisung."
 
-    private val audioText = "Hoere zu."
-    private val explangs = listOf("Arabisch", "Russisch", "Englisch")
-    private lateinit var explangBox: Spinner
-    private lateinit var explainBtn: Button
-
-    private fun leaked(heard: String): Boolean {
-        val h = heard.lowercase()
-        return listOf("aufnahme", "schreibe", "zeile", "anweisung", "korrektur", "antwort:", "hoere zu", "woertlich").any { h.contains(it) }
-    }
+    private val transcribeSystem =
+        "Du bist ein Spracherkenner. Schreibe woertlich auf, was in der Aufnahme gesagt wird, auch mit Fehlern. " +
+        "Verbessere nichts. Gib nur diesen Text aus, ohne Anfuehrungszeichen und ohne Erklaerung."
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -94,6 +91,17 @@ class MainActivity : Activity() {
             addView(levelBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(newBtn)
         }
+        easierBtn = Button(this).apply { text = "Einfacher"; isEnabled = false }
+        explangBox = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, explangs)
+            setSelection(prefs.getInt("explang", 0).coerceIn(0, explangs.size - 1))
+        }
+        transBtn = Button(this).apply { text = "Uebersetzen"; isEnabled = false }
+        val top2 = LinearLayout(this).apply {
+            addView(easierBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(explangBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(transBtn)
+        }
         log = TextView(this).apply { textSize = 16f }
         scroll = ScrollView(this).apply { addView(log) }
         input = EditText(this).apply { hint = "Schreibe oder sprich..." }
@@ -104,35 +112,27 @@ class MainActivity : Activity() {
             addView(mic)
             addView(send)
         }
-        explangBox = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, explangs)
-            setSelection(prefs.getInt("explang", 0).coerceIn(0, explangs.size - 1))
-        }
-        explainBtn = Button(this).apply { text = "Erklaer"; isEnabled = false }
-        val top2 = LinearLayout(this).apply {
-            addView(explangBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(explainBtn)
-        }
-        explangBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                prefs.edit().putInt("explang", pos).apply()
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-        explainBtn.setOnClickListener { explain() }
         root.addView(pick)
         root.addView(top)
         root.addView(top2)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(row)
         setContentView(root)
+        updateTranslateUi()
 
         levelBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
                 if (pos == level) return
                 level = pos
                 prefs.edit().putInt("level", level).apply()
+                updateTranslateUi()
                 if (ready && !busy) scope.launch { rebuild(); append("[Niveau ${levels[level]}]\n", false) }
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        explangBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                prefs.edit().putInt("explang", pos).apply()
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
@@ -144,6 +144,8 @@ class MainActivity : Activity() {
                 append("[Neues Gespraech]\n", false)
             }
         }
+        easierBtn.setOnClickListener { easier() }
+        transBtn.setOnClickListener { translate() }
         pick.setOnClickListener {
             val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
             startActivityForResult(i, 1)
@@ -154,6 +156,12 @@ class MainActivity : Activity() {
         restoreState()
         if (modelFile.exists()) { pick.visibility = View.GONE; loadEngine() }
         else append("Waehle zuerst die Modelldatei (Kopieren dauert einige Minuten).\n", false)
+    }
+
+    private fun updateTranslateUi() {
+        val show = if (level <= 1) View.VISIBLE else View.GONE
+        explangBox.visibility = show
+        transBtn.visibility = show
     }
 
     // ---------- Gedaechtnis (24 Stunden) ----------
@@ -237,7 +245,7 @@ class MainActivity : Activity() {
     private suspend fun rebuild() {
         val e = engine ?: return
         withContext(Dispatchers.Default) {
-            conversation?.close()
+            try { conversation?.close() } catch (x: Throwable) { }
             conversation = newConversation(e)
         }
         turns = 0
@@ -270,7 +278,8 @@ class MainActivity : Activity() {
         mic.isEnabled = ready && (!b || recording)
         levelBox.isEnabled = !b
         newBtn.isEnabled = !b
-        explainBtn.isEnabled = ready && !b
+        easierBtn.isEnabled = ready && !b
+        transBtn.isEnabled = ready && !b
         explangBox.isEnabled = !b
     }
 
@@ -291,8 +300,22 @@ class MainActivity : Activity() {
         return ""
     }
 
+    // ---------- Sprache pruefen (nur Deutsch) ----------
+    private val foreign = Regex("[\\p{IsArabic}\\p{IsCyrillic}\\p{IsDevanagari}\\p{IsHan}\\p{IsHebrew}]")
+    private fun notGerman(t: String) = foreign.containsMatchIn(t)
 
     // ---------- Pruefung der Korrektur durch die App ----------
+    private val colloquial = listOf(
+        "geht's" to "geht es", "gibt's" to "gibt es", "ist's" to "ist es",
+        "war's" to "war es", "wie's" to "wie es", "was's" to "was es"
+    )
+
+    private fun norm(t: String): String {
+        var x = t.replace('\u2019', '\'')
+        colloquial.forEach { (a, b) -> x = x.replace(a, b, ignoreCase = true) }
+        return x
+    }
+
     private fun words(t: String, ignoreCase: Boolean): List<String> {
         val x = if (ignoreCase) t.lowercase() else t
         return x.replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().split(" ").filter { it.isNotBlank() }
@@ -304,9 +327,10 @@ class MainActivity : Activity() {
         val low = corr.lowercase()
         if (corr == "-" || corr.isBlank()) return ""
         if (low.startsWith("richtig") || low.startsWith("korrekt")) return "[Modell: richtig]\n"
-        val a = words(orig, speech)
-        val b = words(corr, speech)
-        if (a == b) return "[OK: keine Aenderung]\n"
+        if (words(orig, speech) == words(corr, speech)) return "[OK: keine Aenderung]\n"
+        val a = words(norm(orig), speech)
+        val b = words(norm(corr), speech)
+        if (a == b) return "[OK: umgangssprachlich richtig]\n"
         val removed = a.toMutableList().also { l -> b.forEach { l.remove(it) } }
         val added = b.toMutableList().also { l -> a.forEach { l.remove(it) } }
         if (removed.isEmpty() && added.isEmpty()) return "[Aenderung: nur Wortstellung]\n"
@@ -318,24 +342,19 @@ class MainActivity : Activity() {
         return "[Aenderung: $r  ->  $n$order]\n"
     }
 
-    // ---------- Erklaerung auf Wunsch ----------
-    private fun explain() {
-        val last = history.lastOrNull()
-        if (last == null) { append("[Noch nichts zu erklaeren]\n", false); return }
-        if (busy || !ready) return
-        val lang = explangs[explangBox.selectedItemPosition]
-        setBusy(true)
-        scope.launch {
-            append("\n[Erklaerung auf $lang]\n")
-            ask(Contents.of("ERKLAERUNG: Der Lernende sagte: '${last.first}'. Deine Antwort war: '${last.second}'. " +
-                "Erklaere auf $lang in hoechstens drei kurzen Saetzen den Fehler und die Korrektur und uebersetze deine Antwort auf $lang. Schreibe nur auf $lang."))
-            append("\n")
-            saveState()
-            setBusy(false)
+    // ---------- Ein Gespraechsschritt (Text, Schreiben oder Sprechen) ----------
+    private suspend fun converse(text: String, speech: Boolean) {
+        if (notGerman(text)) {
+            append("Buddy: Bitte auf Deutsch.\n")
+            return
         }
+        append("Buddy: ")
+        val reply = ask(Contents.of(text))
+        append("\n")
+        append(marker(text, reply, speech))
+        remember(text, reply)
     }
 
-    // ---------- Schreiben ----------
     private fun sendText() {
         val text = input.text.toString().trim()
         if (text.isEmpty() || busy || !ready) return
@@ -343,17 +362,54 @@ class MainActivity : Activity() {
         setBusy(true)
         scope.launch {
             checkExpiry()
-            append("\nDu: $text\nBuddy: ")
-            val reply = ask(Contents.of(text))
-            append("\n")
-            append(marker(text, reply, false))
-            remember(text, reply)
+            append("\nDu: $text\n")
+            converse(text, false)
             saveState()
             setBusy(false)
         }
     }
 
-    // ---------- Sprechen ----------
+    // ---------- Einfacher / Uebersetzen ----------
+    private fun answerOf(reply: String): String {
+        val lines = reply.lines()
+        val idx = lines.indexOfFirst { it.trim().startsWith("Antwort:") }
+        if (idx < 0) return reply.trim()
+        return (listOf(lines[idx].substringAfter("Antwort:")) + lines.drop(idx + 1)).joinToString(" ").trim()
+    }
+
+    private fun easier() {
+        val last = history.lastOrNull()
+        if (last == null) { append("[Noch nichts da]\n", false); return }
+        if (busy || !ready) return
+        val ans = answerOf(last.second)
+        setBusy(true)
+        scope.launch {
+            append("\n[Einfacher]\nBuddy: ")
+            ask(Contents.of("EINFACHER: Sage das Folgende noch einmal auf Deutsch mit ganz einfachen Woertern und sehr kurzen Saetzen. Gib nur den einfachen Text aus: '$ans'"))
+            append("\n")
+            saveState()
+            setBusy(false)
+        }
+    }
+
+    private fun translate() {
+        val last = history.lastOrNull()
+        if (last == null) { append("[Noch nichts da]\n", false); return }
+        if (busy || !ready) return
+        val lang = explangs[explangBox.selectedItemPosition]
+        val adj = lang.removeSuffix("isch") + "ische"
+        val ans = answerOf(last.second)
+        setBusy(true)
+        scope.launch {
+            append("\n[Uebersetzung: $lang]\n")
+            ask(Contents.of("UEBERSETZUNG: Uebersetze den folgenden deutschen Text ins $adj. Gib nur die Uebersetzung aus: '$ans'"))
+            append("\n")
+            saveState()
+            setBusy(false)
+        }
+    }
+
+    // ---------- Sprechen (zwei Schritte: erst verstehen, dann antworten) ----------
     private fun onMic() {
         if (recording) { stopRec = true; return }
         if (busy || !ready) return
@@ -368,6 +424,43 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(code, perms, results)
         if (code == 2 && results.isNotEmpty() && results[0] == PackageManager.PERMISSION_GRANTED) listen()
         else append("Mikrofon-Erlaubnis fehlt.\n", false)
+    }
+
+    private fun cleanTranscript(t: String): String {
+        var x = t.trim().lines().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+        x = x.removePrefix("Verstanden:").trim().trim('"', '\'', '\u201E', '\u201C', '\u201D')
+        return x
+    }
+
+    private fun leakedTranscript(t: String): Boolean {
+        val h = t.lowercase()
+        return listOf("schreibe auf", "spracherkenner", "woertlich", "aufnahme", "anweisung").any { h.contains(it) }
+    }
+
+    private suspend fun transcribe(w: ByteArray): String {
+        val e = engine ?: return ""
+        withContext(Dispatchers.Default) {
+            try { conversation?.close() } catch (x: Throwable) { }
+            conversation = null
+        }
+        val sb = StringBuilder()
+        var conv: Conversation? = null
+        try {
+            val c = withContext(Dispatchers.Default) {
+                e.createConversation(ConversationConfig(
+                    systemInstruction = Contents.of(transcribeSystem),
+                    samplerConfig = SamplerConfig(topK = 10, topP = 0.9, temperature = 0.1),
+                    thinkingConfig = ThinkingConfig(enableThinking = false),
+                    maxOutputToken = 150))
+            }
+            conv = c
+            c.sendMessageAsync(Contents.of(Content.AudioBytes(w), Content.Text("Schreibe auf.")))
+                .collect { sb.append(it.toString()) }
+        } finally {
+            withContext(Dispatchers.Default) { try { conv?.close() } catch (x: Throwable) { } }
+            rebuild()
+        }
+        return cleanTranscript(sb.toString())
     }
 
     private fun listen() {
@@ -387,26 +480,18 @@ class MainActivity : Activity() {
                 return@launch
             }
             checkExpiry()
-            val logBefore = log.text.length
-            val chatBefore = chat.length
-            append("Buddy: ")
-            val reply = ask(Contents.of(Content.AudioBytes(wav(pcm)), Content.Text(audioText)))
-            val lines = reply.lines()
-            val heardRaw = lines.firstOrNull { it.trim().startsWith("Verstanden:") }
-                ?.substringAfter("Verstanden:")?.trim().orEmpty()
-            if (leaked(heardRaw)) {
-                log.text = log.text.toString().substring(0, logBefore)
-                chat.setLength(chatBefore)
-                rebuild()
+            append("[Ich verstehe ...]\n", false)
+            val heard = try { transcribe(wav(pcm)) } catch (t: Throwable) {
+                append("Fehler: ${t.message}\n", false); ""
+            }
+            if (heard.isBlank() || leakedTranscript(heard)) {
                 append("[Nicht verstanden. Bitte nochmal sprechen.]\n", false)
                 saveState()
                 setBusy(false)
                 return@launch
             }
-            append("\n")
-            val heard = heardRaw.ifBlank { "(Sprachnachricht)" }
-            append(marker(heard, reply, true))
-            remember(heard, lines.filterNot { it.trim().startsWith("Verstanden:") }.joinToString("\n"))
+            append("Verstanden: $heard\n")
+            converse(heard, true)
             saveState()
             setBusy(false)
         }
@@ -465,8 +550,8 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         stopRec = true
         scope.cancel()
-        conversation?.close()
-        engine?.close()
+        try { conversation?.close() } catch (x: Throwable) { }
+        try { engine?.close() } catch (x: Throwable) { }
         super.onDestroy()
     }
 }
