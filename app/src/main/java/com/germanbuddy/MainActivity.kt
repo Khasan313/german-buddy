@@ -53,23 +53,19 @@ class MainActivity : Activity() {
     private val chatFile get() = File(filesDir, "chat.txt")
 
     private val levelRules = listOf(
-        "Niveau A1: Nur ganz einfache, haeufige Woerter. Saetze mit 3 bis 6 Woertern, nur Praesens. Alltagsthemen wie Name, Familie, Essen. Korrigiere nur die wichtigsten Fehler.",
-        "Niveau A2: Einfache kurze Saetze, Praesens und Perfekt. Alltagsthemen wie Einkaufen, Arbeit, Freizeit. Korrigiere die wichtigsten Fehler.",
-        "Niveau B1: Klare Saetze mit weil, dass, wenn. Vergangenheit und Zukunft. Themen wie Reisen, Arbeit, Meinungen. Korrigiere alle Grammatikfehler.",
-        "Niveau B2: Laengere, genaue Saetze und abstraktere Themen. Meinungen begruenden. Korrigiere Grammatik und Wortwahl.",
-        "Niveau C1: Natuerliche, reiche Sprache mit Redewendungen und anspruchsvollen Themen. Korrigiere auch Stil und Praezision.",
-        "Niveau C2: Fast muttersprachliche, nuancierte Sprache mit Redewendungen und feinen Unterschieden. Korrigiere auch Stil und Nuancen."
+        "Niveau A1: Nur ganz einfache, haeufige Woerter. Saetze mit 3 bis 6 Woertern, nur Praesens. Alltagsthemen wie Name, Familie, Essen.",
+        "Niveau A2: Einfache kurze Saetze, Praesens und Perfekt. Alltagsthemen wie Einkaufen, Arbeit, Freizeit.",
+        "Niveau B1: Klare Saetze mit weil, dass, wenn. Vergangenheit und Zukunft. Themen wie Reisen, Arbeit, Meinungen.",
+        "Niveau B2: Laengere, genaue Saetze und abstraktere Themen. Meinungen begruenden.",
+        "Niveau C1: Natuerliche, reiche Sprache mit Redewendungen und anspruchsvollen Themen.",
+        "Niveau C2: Fast muttersprachliche, nuancierte Sprache mit Redewendungen und feinen Unterschieden."
     )
 
     private fun systemFor(l: Int) =
-        "Du bist ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. ${levelRules[l]} " +
-        "Der Lernende soll nur Deutsch sprechen. Benutzt er eine andere Sprache, antworte genau mit den zwei Zeilen 'Korrektur: -' und 'Antwort: Bitte auf Deutsch.' " +
-        "Antworte sonst immer genau in diesen zwei Zeilen. " +
-        "Zeile 1: 'Korrektur: ' und dann NUR der Satz des Lernenden korrekt geschrieben. Aendere nie einen Satz, der schon richtig ist: dann schreibe genau 'Korrektur: Richtig!'. " +
-        "Korrigiere keine umgangssprachlichen Formen, die im gesprochenen Deutsch ueblich und richtig sind (zum Beispiel geht's, gibt's, Kommst du ins Kino mit?). " +
-        "Pruefe bei jedem Satz: Verb an zweiter Stelle im Hauptsatz, Artikel und Kasus, Konjugation, haben oder sein im Perfekt, passende Zeitangabe, Rechtschreibung. " +
-        "Zeile 2: 'Antwort: ' und dann hoechstens zwei kurze Saetze auf dem Niveau des Lernenden, am Ende eine einfache Frage. " +
-        "Beginnt die Nachricht mit 'EINFACHER:' oder 'UEBERSETZUNG:', ignoriere das Zwei-Zeilen-Format, erfuelle genau diese Aufgabe und wiederhole nie die Anweisung."
+        "Du bist Max, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
+        "Antworte nur mit hoechstens zwei kurzen Saetzen auf dem Niveau des Lernenden und stelle am Ende eine einfache Frage. " +
+        "Kommentiere nie die Grammatik und korrigiere nichts. " +
+        "Spricht der Lernende nicht Deutsch, antworte nur mit: Bitte auf Deutsch."
 
     private val transcribeSystem =
         "Du bist ein Spracherkenner. Schreibe woertlich auf, was in der Aufnahme gesagt wird, auch mit Fehlern. " +
@@ -284,7 +280,7 @@ class MainActivity : Activity() {
     }
 
     private suspend fun ask(contents: Contents): String {
-        if (turns >= 3) rebuild()
+        if (conversation == null || turns >= 3) rebuild()
         for (attempt in 1..2) {
             val sb = StringBuilder()
             try {
@@ -300,6 +296,47 @@ class MainActivity : Activity() {
         return ""
     }
 
+    // Eine Einzelaufgabe in einer eigenen, kurzen Konversation (die Hauptkonversation wird spaeter neu aufgebaut)
+    private suspend fun oneShot(system: String, user: Contents, maxTokens: Int, temp: Double): String {
+        val e = engine ?: return ""
+        withContext(Dispatchers.Default) {
+            try { conversation?.close() } catch (x: Throwable) { }
+            conversation = null
+        }
+        val sb = StringBuilder()
+        var conv: Conversation? = null
+        try {
+            val c = withContext(Dispatchers.Default) {
+                e.createConversation(ConversationConfig(
+                    systemInstruction = Contents.of(system),
+                    samplerConfig = SamplerConfig(topK = 10, topP = 0.9, temperature = temp),
+                    thinkingConfig = ThinkingConfig(enableThinking = false),
+                    maxOutputToken = maxTokens))
+            }
+            conv = c
+            c.sendMessageAsync(user).collect { sb.append(it.toString()) }
+        } catch (t: Throwable) {
+            append("[Fehler: ${t.message}]\n", false)
+        } finally {
+            withContext(Dispatchers.Default) { try { conv?.close() } catch (x: Throwable) { } }
+        }
+        return sb.toString()
+    }
+
+    private fun stripQuotes(t: String) = t.trim().trim('"', '\'', '\u201E', '\u201C', '\u201D', '\u00AB', '\u00BB').trim()
+
+    private fun cleanLine(t: String): String {
+        var x = t.trim().lines().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
+        listOf("Korrigierter Satz:", "Korrektur:", "Verstanden:", "Antwort:").forEach { x = x.removePrefix(it).trim() }
+        return stripQuotes(x)
+    }
+
+    private fun cleanText(t: String): String {
+        var x = t.lines().filter { it.isNotBlank() }.joinToString(" ").trim()
+        listOf("Verstanden:", "Antwort:").forEach { x = x.removePrefix(it).trim() }
+        return stripQuotes(x)
+    }
+
     // ---------- Sprache pruefen (nur Deutsch) ----------
     private val foreign = Regex("[\\p{IsArabic}\\p{IsCyrillic}\\p{IsDevanagari}\\p{IsHan}\\p{IsHebrew}]")
     private fun notGerman(t: String) = foreign.containsMatchIn(t)
@@ -313,7 +350,7 @@ class MainActivity : Activity() {
     private fun norm(t: String): String {
         var x = t.replace('\u2019', '\'')
         colloquial.forEach { (a, b) -> x = x.replace(a, b, ignoreCase = true) }
-        return x
+        return x.replace(Regex("\\bhab\\b", RegexOption.IGNORE_CASE), "habe")
     }
 
     private fun words(t: String, ignoreCase: Boolean): List<String> {
@@ -321,12 +358,8 @@ class MainActivity : Activity() {
         return x.replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim().split(" ").filter { it.isNotBlank() }
     }
 
-    private fun marker(orig: String, reply: String, speech: Boolean): String {
-        val line = reply.lines().firstOrNull { it.trim().startsWith("Korrektur:") } ?: return ""
-        val corr = line.substringAfter("Korrektur:").trim()
-        val low = corr.lowercase()
-        if (corr == "-" || corr.isBlank()) return ""
-        if (low.startsWith("richtig") || low.startsWith("korrekt")) return "[Modell: richtig]\n"
+    private fun diffMarker(orig: String, corr: String, speech: Boolean): String {
+        if (corr.isBlank()) return ""
         if (words(orig, speech) == words(corr, speech)) return "[OK: keine Aenderung]\n"
         val a = words(norm(orig), speech)
         val b = words(norm(corr), speech)
@@ -342,17 +375,32 @@ class MainActivity : Activity() {
         return "[Aenderung: $r  ->  $n$order]\n"
     }
 
-    // ---------- Ein Gespraechsschritt (Text, Schreiben oder Sprechen) ----------
+    // ---------- Schritt 2: Korrektur (eigene Konversation, nur diese Aufgabe) ----------
+    private suspend fun correct(text: String): String {
+        val out = oneShot("Du bist ein Korrekturprogramm fuer Deutsch.",
+            Contents.of("Korrigiere nur diesen Satz und gib nur den korrigierten Satz aus: $text"), 120, 0.1)
+        return cleanLine(out)
+    }
+
+    // ---------- Ein Gespraechsschritt: Korrektur, dann Antwort ----------
     private suspend fun converse(text: String, speech: Boolean) {
         if (notGerman(text)) {
             append("Buddy: Bitte auf Deutsch.\n")
             return
         }
+        val c = correct(text)
+        var corrected = text
+        if (c.isBlank() || c.lowercase().startsWith("richtig")) {
+            append("[Korrektur nicht moeglich]\n", false)
+        } else {
+            corrected = c
+            append("Korrektur: $corrected\n")
+            append(diffMarker(text, corrected, speech))
+        }
         append("Buddy: ")
-        val reply = ask(Contents.of(text))
+        val reply = ask(Contents.of(corrected))
         append("\n")
-        append(marker(text, reply, speech))
-        remember(text, reply)
+        remember(corrected, reply)
     }
 
     private fun sendText() {
@@ -369,13 +417,9 @@ class MainActivity : Activity() {
         }
     }
 
-    // ---------- Einfacher / Uebersetzen ----------
-    private fun answerOf(reply: String): String {
-        val lines = reply.lines()
-        val idx = lines.indexOfFirst { it.trim().startsWith("Antwort:") }
-        if (idx < 0) return reply.trim()
-        return (listOf(lines[idx].substringAfter("Antwort:")) + lines.drop(idx + 1)).joinToString(" ").trim()
-    }
+    // ---------- Einfacher / Uebersetzen (je eine eigene Konversation) ----------
+    private fun answerOf(reply: String): String =
+        reply.lines().filter { it.isNotBlank() }.joinToString(" ").removePrefix("Antwort:").trim()
 
     private fun easier() {
         val last = history.lastOrNull()
@@ -385,8 +429,9 @@ class MainActivity : Activity() {
         setBusy(true)
         scope.launch {
             append("\n[Einfacher]\nBuddy: ")
-            ask(Contents.of("EINFACHER: Sage das Folgende noch einmal auf Deutsch mit ganz einfachen Woertern und sehr kurzen Saetzen. Gib nur den einfachen Text aus: '$ans'"))
-            append("\n")
+            val out = oneShot("Du formulierst deutsche Texte in ganz einfachem Deutsch um.",
+                Contents.of("Sage das noch einmal mit ganz einfachen Woertern und sehr kurzen Saetzen. Gib nur den einfachen Text aus: $ans"), 150, 0.2)
+            append(stripQuotes(out) + "\n")
             saveState()
             setBusy(false)
         }
@@ -402,14 +447,15 @@ class MainActivity : Activity() {
         setBusy(true)
         scope.launch {
             append("\n[Uebersetzung: $lang]\n")
-            ask(Contents.of("UEBERSETZUNG: Uebersetze den folgenden deutschen Text ins $adj. Gib nur die Uebersetzung aus: '$ans'"))
-            append("\n")
+            val out = oneShot("Du bist ein Uebersetzer.",
+                Contents.of("Uebersetze ins $adj. Gib nur die Uebersetzung aus: $ans"), 150, 0.1)
+            append(stripQuotes(out) + "\n")
             saveState()
             setBusy(false)
         }
     }
 
-    // ---------- Sprechen (zwei Schritte: erst verstehen, dann antworten) ----------
+    // ---------- Sprechen (Schritt 1: verstehen) ----------
     private fun onMic() {
         if (recording) { stopRec = true; return }
         if (busy || !ready) return
@@ -426,41 +472,9 @@ class MainActivity : Activity() {
         else append("Mikrofon-Erlaubnis fehlt.\n", false)
     }
 
-    private fun cleanTranscript(t: String): String {
-        var x = t.trim().lines().firstOrNull { it.isNotBlank() }?.trim().orEmpty()
-        x = x.removePrefix("Verstanden:").trim().trim('"', '\'', '\u201E', '\u201C', '\u201D')
-        return x
-    }
-
     private fun leakedTranscript(t: String): Boolean {
         val h = t.lowercase()
-        return listOf("schreibe auf", "spracherkenner", "woertlich", "aufnahme", "anweisung").any { h.contains(it) }
-    }
-
-    private suspend fun transcribe(w: ByteArray): String {
-        val e = engine ?: return ""
-        withContext(Dispatchers.Default) {
-            try { conversation?.close() } catch (x: Throwable) { }
-            conversation = null
-        }
-        val sb = StringBuilder()
-        var conv: Conversation? = null
-        try {
-            val c = withContext(Dispatchers.Default) {
-                e.createConversation(ConversationConfig(
-                    systemInstruction = Contents.of(transcribeSystem),
-                    samplerConfig = SamplerConfig(topK = 10, topP = 0.9, temperature = 0.1),
-                    thinkingConfig = ThinkingConfig(enableThinking = false),
-                    maxOutputToken = 150))
-            }
-            conv = c
-            c.sendMessageAsync(Contents.of(Content.AudioBytes(w), Content.Text("Schreibe auf.")))
-                .collect { sb.append(it.toString()) }
-        } finally {
-            withContext(Dispatchers.Default) { try { conv?.close() } catch (x: Throwable) { } }
-            rebuild()
-        }
-        return cleanTranscript(sb.toString())
+        return listOf("schreibe auf", "schreiben auf", "spracherkenner", "woertlich", "aufnahme", "anweisung").any { h.contains(it) }
     }
 
     private fun listen() {
@@ -481,9 +495,8 @@ class MainActivity : Activity() {
             }
             checkExpiry()
             append("[Ich verstehe ...]\n", false)
-            val heard = try { transcribe(wav(pcm)) } catch (t: Throwable) {
-                append("Fehler: ${t.message}\n", false); ""
-            }
+            val heard = cleanText(oneShot(transcribeSystem,
+                Contents.of(Content.AudioBytes(wav(pcm)), Content.Text("Schreibe auf.")), 150, 0.1))
             if (heard.isBlank() || leakedTranscript(heard)) {
                 append("[Nicht verstanden. Bitte nochmal sprechen.]\n", false)
                 saveState()
