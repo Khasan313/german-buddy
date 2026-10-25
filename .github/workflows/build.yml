@@ -15,6 +15,15 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+      - name: Decode signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/buddy.p12"
+            echo "KEYSTORE_PATH=$RUNNER_TEMP/buddy.p12" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=germanbuddy-key-2026" >> "$GITHUB_ENV"
+          fi
       - run: gradle :app:assembleDebug --no-daemon --stacktrace
       - uses: actions/upload-artifact@v4
         with:
