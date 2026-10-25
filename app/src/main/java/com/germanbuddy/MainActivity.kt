@@ -62,14 +62,14 @@ class MainActivity : Activity() {
     )
 
     private fun systemFor(l: Int) =
-        "Du bist Max, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
+        "Du bist Adam, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
         "Antworte nur mit hoechstens zwei kurzen Saetzen auf dem Niveau des Lernenden und stelle am Ende eine einfache Frage. " +
         "Kommentiere nie die Grammatik und korrigiere nichts. " +
         "Spricht der Lernende nicht Deutsch, antworte nur mit: Bitte auf Deutsch."
 
     private val transcribeSystem =
-        "Du bist ein Spracherkenner. Schreibe woertlich auf, was in der Aufnahme gesagt wird, auch mit Fehlern. " +
-        "Verbessere nichts. Gib nur diesen Text aus, ohne Anfuehrungszeichen und ohne Erklaerung."
+        "Du bist ein Spracherkenner. Schreibe woertlich auf, was in der Aufnahme gesagt wird, in der Sprache der Aufnahme, auch mit Fehlern. " +
+        "Verbessere nichts und uebersetze nichts. Gib das Ergebnis genau so aus: <t>TEXT</t> und sonst nichts."
 
     override fun onCreate(b: Bundle?) {
         super.onCreate(b)
@@ -339,7 +339,24 @@ class MainActivity : Activity() {
 
     // ---------- Sprache pruefen (nur Deutsch) ----------
     private val foreign = Regex("[\\p{IsArabic}\\p{IsCyrillic}\\p{IsDevanagari}\\p{IsHan}\\p{IsHebrew}]")
-    private fun notGerman(t: String) = foreign.containsMatchIn(t)
+    private val english = setOf("the", "you", "your", "are", "how", "what", "where", "when", "why", "who", "speak", "write",
+        "down", "english", "please", "thanks", "thank", "with", "would", "can", "do", "does", "is", "this", "that", "my",
+        "me", "i", "it", "to", "and", "of", "for", "not", "yes", "good", "morning", "again")
+
+    private fun looksEnglish(t: String): Boolean {
+        val w = t.lowercase().replace(Regex("[^a-z ]+"), " ").trim().split(" ").filter { it.isNotBlank() }
+        if (w.isEmpty()) return false
+        val n = w.count { it in english }
+        return n >= 2 || (n >= 1 && w.size <= 3)
+    }
+
+    private fun notGerman(t: String) = foreign.containsMatchIn(t) || looksEnglish(t)
+
+    private fun extractTagged(t: String): String {
+        val m = Regex("<t>(.*?)</t>", RegexOption.DOT_MATCHES_ALL).find(t)
+        val inner = (m?.groupValues?.get(1) ?: t.substringAfter("<t>", t)).replace("</t>", "")
+        return cleanText(inner)
+    }
 
     // ---------- Pruefung der Korrektur durch die App ----------
     private val colloquial = listOf(
@@ -474,7 +491,7 @@ class MainActivity : Activity() {
 
     private fun leakedTranscript(t: String): Boolean {
         val h = t.lowercase()
-        return listOf("schreibe auf", "schreiben auf", "spracherkenner", "woertlich", "aufnahme", "anweisung").any { h.contains(it) }
+        return listOf("schreibe auf", "schreiben auf", "schreib auf", "transkription", "spracherkenner", "woertlich", "aufnahme", "anweisung").any { h.contains(it) }
     }
 
     private fun listen() {
@@ -495,8 +512,12 @@ class MainActivity : Activity() {
             }
             checkExpiry()
             append("[Ich verstehe ...]\n", false)
-            val heard = cleanText(oneShot(transcribeSystem,
-                Contents.of(Content.AudioBytes(wav(pcm)), Content.Text("Schreibe auf.")), 150, 0.1))
+            val w = wav(pcm)
+            var heard = extractTagged(oneShot(transcribeSystem, Contents.of(Content.AudioBytes(w)), 150, 0.1))
+            if (heard.isBlank()) {
+                heard = extractTagged(oneShot(transcribeSystem,
+                    Contents.of(Content.AudioBytes(w), Content.Text("Transkription.")), 150, 0.1))
+            }
             if (heard.isBlank() || leakedTranscript(heard)) {
                 append("[Nicht verstanden. Bitte nochmal sprechen.]\n", false)
                 saveState()
