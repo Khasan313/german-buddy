@@ -11,6 +11,9 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Bundle
+import android.speech.tts.TextToSpeech
+import android.speech.tts.Voice
+import java.util.Locale
 import android.view.View
 import android.widget.*
 import com.google.ai.edge.litertlm.*
@@ -62,7 +65,7 @@ class MainActivity : Activity() {
     )
 
     private fun systemFor(l: Int) =
-        "Du bist Adam, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
+        "Du bist Max, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
         "Antworte nur mit hoechstens zwei kurzen Saetzen auf dem Niveau des Lernenden und stelle am Ende eine einfache Frage. " +
         "Kommentiere nie die Grammatik und korrigiere nichts. " +
         "Spricht der Lernende nicht Deutsch, antworte nur mit: Bitte auf Deutsch."
@@ -83,8 +86,12 @@ class MainActivity : Activity() {
             setSelection(level)
         }
         newBtn = Button(this).apply { text = "Neu" }
+        voiceBox = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf("Stimme ..."))
+        }
         val top = LinearLayout(this).apply {
             addView(levelBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(voiceBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(newBtn)
         }
         easierBtn = Button(this).apply { text = "Einfacher"; isEnabled = false }
@@ -115,6 +122,7 @@ class MainActivity : Activity() {
         root.addView(row)
         setContentView(root)
         updateTranslateUi()
+        initTts()
 
         levelBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
@@ -122,6 +130,7 @@ class MainActivity : Activity() {
                 level = pos
                 prefs.edit().putInt("level", level).apply()
                 updateTranslateUi()
+                applyRate()
                 if (ready && !busy) scope.launch { rebuild(); append("[Niveau ${levels[level]}]\n", false) }
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
@@ -129,6 +138,15 @@ class MainActivity : Activity() {
         explangBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
                 prefs.edit().putInt("explang", pos).apply()
+            }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        voiceBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                if (!ttsReady || pos == voiceIdx) return
+                voiceIdx = pos
+                prefs.edit().putInt("voice", pos).apply()
+                applyVoice(true)
             }
             override fun onNothingSelected(p: AdapterView<*>?) {}
         }
@@ -235,7 +253,7 @@ class MainActivity : Activity() {
             initialMessages = initial,
             samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.3),
             thinkingConfig = ThinkingConfig(enableThinking = false),
-            maxOutputToken = 300))
+            maxOutputToken = 120))
     }
 
     private suspend fun rebuild() {
@@ -284,11 +302,13 @@ class MainActivity : Activity() {
         for (attempt in 1..2) {
             val sb = StringBuilder()
             try {
-                conversation!!.sendMessageAsync(contents).collect { val t = it.toString(); sb.append(t); append(t) }
+                conversation!!.sendMessageAsync(contents).collect { val t = it.toString(); sb.append(t); append(t); speakFeed(t) }
+                speakFlush()
                 turns++
                 return sb.toString()
             } catch (t: Throwable) {
                 if (attempt == 2) { append("\n[Fehler: ${t.message}. Bitte App neu starten.]", false); return "" }
+                speakBuf.setLength(0); tts?.stop()
                 append("\n[Gespraech wird neu aufgebaut ...]\nBuddy: ", false)
                 rebuild()
             }
@@ -381,6 +401,8 @@ class MainActivity : Activity() {
         val a = words(norm(orig), speech)
         val b = words(norm(corr), speech)
         if (a == b) return "[OK: umgangssprachlich richtig]\n"
+        val a2 = a.map { w -> if (!b.contains(w) && b.contains(w + "e")) w + "e" else w }
+        if (a2 == b) return "[OK: umgangssprachlich richtig]\n"
         val removed = a.toMutableList().also { l -> b.forEach { l.remove(it) } }
         val added = b.toMutableList().also { l -> a.forEach { l.remove(it) } }
         if (removed.isEmpty() && added.isEmpty()) return "[Aenderung: nur Wortstellung]\n"
@@ -448,7 +470,7 @@ class MainActivity : Activity() {
             append("\n[Einfacher]\nBuddy: ")
             val out = oneShot("Du formulierst deutsche Texte in ganz einfachem Deutsch um.",
                 Contents.of("Sage das noch einmal mit ganz einfachen Woertern und sehr kurzen Saetzen. Gib nur den einfachen Text aus: $ans"), 150, 0.2)
-            append(stripQuotes(out) + "\n")
+            val txt = stripQuotes(out); append(txt + "\n"); sayNow(txt)
             saveState()
             setBusy(false)
         }
@@ -474,6 +496,7 @@ class MainActivity : Activity() {
 
     // ---------- Sprechen (Schritt 1: verstehen) ----------
     private fun onMic() {
+        tts?.stop(); speakBuf.setLength(0)
         if (recording) { stopRec = true; return }
         if (busy || !ready) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -581,9 +604,82 @@ class MainActivity : Activity() {
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
     }
 
+    // ---------- Stimme (Android-TextToSpeech, auch ohne Internet) ----------
+    private var tts: TextToSpeech? = null
+    private var ttsReady = false
+    private var voices: List<Voice> = emptyList()
+    private var voiceIdx = 0
+    private val speakBuf = StringBuilder()
+    private lateinit var voiceBox: Spinner
+
+    private fun initTts() {
+        tts = TextToSpeech(this) { status ->
+            val t = tts
+            if (status != TextToSpeech.SUCCESS || t == null) {
+                append("[Keine Sprachausgabe verfuegbar]\n", false)
+                return@TextToSpeech
+            }
+            t.setLanguage(Locale.GERMANY)
+            voices = try {
+                t.voices.filter { it.locale.language == "de" && !it.isNetworkConnectionRequired }.sortedBy { it.name }
+            } catch (e: Throwable) { emptyList() }
+            if (voices.isEmpty()) {
+                voiceBox.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("Keine Stimme"))
+                append("[Keine deutsche Stimme ohne Internet gefunden. Einstellungen > Text-in-Sprache: Deutsch installieren]\n", false)
+                return@TextToSpeech
+            }
+            ttsReady = true
+            val items = listOf("Stimme aus") + voices.indices.map { "Stimme ${it + 1}" }
+            voiceIdx = prefs.getInt("voice", 1).coerceIn(0, voices.size)
+            voiceBox.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+            voiceBox.setSelection(voiceIdx)
+            applyVoice(false)
+        }
+    }
+
+    private fun applyRate() {
+        tts?.setSpeechRate(when (level) { 0 -> 0.8f; 1 -> 0.9f; else -> 1.0f })
+    }
+
+    private fun applyVoice(test: Boolean) {
+        val t = tts ?: return
+        if (voiceIdx == 0) { t.stop(); return }
+        t.voice = voices[voiceIdx - 1]
+        applyRate()
+        if (test) t.speak("Hallo, ich bin Max.", TextToSpeech.QUEUE_FLUSH, null, "test")
+    }
+
+    private fun sayNow(s: String) {
+        if (!ttsReady || voiceIdx == 0 || s.isBlank()) return
+        tts?.speak(s, TextToSpeech.QUEUE_ADD, null, "u" + System.nanoTime())
+    }
+
+    private fun speakFeed(chunk: String) {
+        if (!ttsReady || voiceIdx == 0) return
+        speakBuf.append(chunk)
+        while (true) {
+            var idx = -1
+            for (i in 0 until speakBuf.length - 1) {
+                val c = speakBuf[i]
+                if ((c == '.' || c == '!' || c == '?') && speakBuf[i + 1].isWhitespace()) { idx = i; break }
+            }
+            if (idx < 0) return
+            val sentence = speakBuf.substring(0, idx + 1).trim()
+            speakBuf.delete(0, idx + 1)
+            sayNow(sentence)
+        }
+    }
+
+    private fun speakFlush() {
+        val rest = speakBuf.toString().trim()
+        speakBuf.setLength(0)
+        sayNow(rest)
+    }
+
     override fun onDestroy() {
         stopRec = true
         scope.cancel()
+        try { tts?.stop(); tts?.shutdown() } catch (x: Throwable) { }
         try { conversation?.close() } catch (x: Throwable) { }
         try { engine?.close() } catch (x: Throwable) { }
         super.onDestroy()
