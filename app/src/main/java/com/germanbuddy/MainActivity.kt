@@ -3,6 +3,7 @@ package com.germanbuddy
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
@@ -65,10 +66,10 @@ class MainActivity : Activity() {
     )
 
     private fun systemFor(l: Int) =
-        "Du bist Max, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
+        "Du bist $buddyName, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
         "Antworte nur mit hoechstens zwei kurzen Saetzen auf dem Niveau des Lernenden und stelle am Ende eine einfache Frage. " +
         "Kommentiere nie die Grammatik und korrigiere nichts. " +
-        "Spricht der Lernende nicht Deutsch, antworte nur mit: Bitte auf Deutsch."
+        "Spricht der Lernende nicht Deutsch, antworte nur mit: Bitte auf Deutsch." + factsText()
 
     private val transcribeSystem =
         "Du bist ein Spracherkenner. Schreibe woertlich auf, was in der Aufnahme gesagt wird, in der Sprache der Aufnahme, auch mit Fehlern. " +
@@ -78,6 +79,8 @@ class MainActivity : Activity() {
         super.onCreate(b)
         prefs = getSharedPreferences("buddy", Context.MODE_PRIVATE)
         level = prefs.getInt("level", 1).coerceIn(0, 5)
+        buddyName = prefs.getString("buddyName", "Max") ?: "Max"
+        loadFacts()
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 48, 24, 24) }
         val pick = Button(this).apply { text = "Modelldatei waehlen (.litertlm)" }
@@ -105,6 +108,8 @@ class MainActivity : Activity() {
             addView(explangBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(transBtn)
         }
+        memBtn = Button(this).apply { text = "Gedaechtnis (0)" }
+        val top3 = LinearLayout(this).apply { addView(memBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)) }
         log = TextView(this).apply { textSize = 16f }
         scroll = ScrollView(this).apply { addView(log) }
         input = EditText(this).apply { hint = "Schreibe oder sprich..." }
@@ -118,6 +123,7 @@ class MainActivity : Activity() {
         root.addView(pick)
         root.addView(top)
         root.addView(top2)
+        root.addView(top3)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(row)
         setContentView(root)
@@ -159,6 +165,8 @@ class MainActivity : Activity() {
             }
         }
         easierBtn.setOnClickListener { easier() }
+        memBtn.setOnClickListener { memoryMenu() }
+        updateMemBtn()
         transBtn.setOnClickListener { translate() }
         pick.setOnClickListener {
             val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
@@ -168,6 +176,10 @@ class MainActivity : Activity() {
         mic.setOnClickListener { onMic() }
 
         restoreState()
+        val nowMs = System.currentTimeMillis()
+        val lastReview = prefs.getLong("review", 0L)
+        if (lastReview == 0L) prefs.edit().putLong("review", nowMs).apply()
+        else if (nowMs - lastReview > 30L * dayMs && facts.isNotEmpty()) log.post { factsDialog(true) }
         if (modelFile.exists()) { pick.visibility = View.GONE; loadEngine() }
         else append("Waehle zuerst die Modelldatei (Kopieren dauert einige Minuten).\n", false)
     }
@@ -309,7 +321,7 @@ class MainActivity : Activity() {
             } catch (t: Throwable) {
                 if (attempt == 2) { append("\n[Fehler: ${t.message}. Bitte App neu starten.]", false); return "" }
                 speakBuf.setLength(0); tts?.stop()
-                append("\n[Gespraech wird neu aufgebaut ...]\nBuddy: ", false)
+                append("\n[Gespraech wird neu aufgebaut ...]\n$buddyName: ", false)
                 rebuild()
             }
         }
@@ -423,8 +435,10 @@ class MainActivity : Activity() {
 
     // ---------- Ein Gespraechsschritt: Korrektur, dann Antwort ----------
     private suspend fun converse(text: String, speech: Boolean) {
+        rememberRe.find(text)?.let { addFact(it.groupValues[2].trim().trimEnd('.')); return }
+        forgetRe.find(text)?.let { forgetFact(it.groupValues[2].trim().trimEnd('.')); return }
         if (notGerman(text)) {
-            append("Buddy: Bitte auf Deutsch.\n")
+            append("$buddyName: Bitte auf Deutsch.\n")
             return
         }
         val c = correct(text)
@@ -436,7 +450,7 @@ class MainActivity : Activity() {
             append("Korrektur: $corrected\n")
             append(diffMarker(text, corrected, speech))
         }
-        append("Buddy: ")
+        append("$buddyName: ")
         val reply = ask(Contents.of(corrected))
         append("\n")
         remember(corrected, reply)
@@ -467,7 +481,7 @@ class MainActivity : Activity() {
         val ans = answerOf(last.second)
         setBusy(true)
         scope.launch {
-            append("\n[Einfacher]\nBuddy: ")
+            append("\n[Einfacher]\n$buddyName: ")
             val out = oneShot("Du formulierst deutsche Texte in ganz einfachem Deutsch um.",
                 Contents.of("Sage das noch einmal mit ganz einfachen Woertern und sehr kurzen Saetzen. Gib nur den einfachen Text aus: $ans"), 150, 0.2)
             val txt = stripQuotes(out); append(txt + "\n"); sayNow(txt)
@@ -604,6 +618,122 @@ class MainActivity : Activity() {
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
     }
 
+    // ---------- Dauerhaftes Gedaechtnis ----------
+    private var buddyName = "Max"
+    private val facts = mutableListOf<String>()
+    private val factsFile get() = File(filesDir, "facts.json")
+    private lateinit var memBtn: Button
+    private val rememberRe = Regex("^\\s*(merke dir|merk dir)\\s*[:,]?\\s*(.+)$", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+    private val forgetRe = Regex("^\\s*(vergiss)\\s*[:,]?\\s*(.+)$", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
+
+    private fun factsText(): String =
+        if (facts.isEmpty()) "" else
+            " Wichtige Fakten ueber den Lernenden, die du kennst (nutze sie natuerlich, ohne sie jedes Mal zu wiederholen): " +
+                facts.joinToString("; ") + "."
+
+    private fun loadFacts() {
+        facts.clear()
+        try {
+            if (factsFile.exists()) {
+                val a = JSONArray(factsFile.readText())
+                for (i in 0 until a.length()) facts.add(a.getString(i))
+            }
+        } catch (e: Throwable) { }
+    }
+
+    private fun saveFacts() {
+        try {
+            val a = JSONArray()
+            facts.forEach { a.put(it) }
+            factsFile.writeText(a.toString())
+        } catch (e: Throwable) { }
+        updateMemBtn()
+    }
+
+    private fun updateMemBtn() { memBtn.text = "Gedaechtnis (${facts.size})" }
+
+    private suspend fun addFact(f: String) {
+        val t = f.trim().take(120)
+        if (t.isBlank()) return
+        if (facts.size >= 20) { append("[Gedaechtnis voll (20). Loesche zuerst etwas.]\n"); return }
+        facts.add(t)
+        saveFacts()
+        append("[Gemerkt: $t]\n")
+        rebuild()
+    }
+
+    private suspend fun forgetFact(q: String) {
+        val key = q.trim().lowercase()
+        if (key == "alles") {
+            val n = facts.size
+            facts.clear(); saveFacts()
+            append("[Vergessen: alles ($n)]\n")
+        } else {
+            val before = facts.size
+            facts.removeAll { it.lowercase().contains(key) }
+            saveFacts()
+            val n = before - facts.size
+            append(if (n == 0) "[Nichts gefunden zu: $q]\n" else "[Vergessen: $n]\n")
+        }
+        rebuild()
+    }
+
+    private fun memoryMenu() {
+        val items = arrayOf<CharSequence>(
+            "Eintraege ansehen / loeschen (${facts.size})",
+            "Neuen Eintrag hinzufuegen",
+            "Name des Partners aendern ($buddyName)")
+        AlertDialog.Builder(this).setTitle("Gedaechtnis")
+            .setItems(items) { _, w ->
+                when (w) { 0 -> factsDialog(false); 1 -> addFactDialog(); else -> nameDialog() }
+            }
+            .setNegativeButton("Schliessen", null).show()
+    }
+
+    private fun factsDialog(review: Boolean) {
+        if (facts.isEmpty()) {
+            Toast.makeText(this, "Das Gedaechtnis ist leer", Toast.LENGTH_SHORT).show()
+            if (review) prefs.edit().putLong("review", System.currentTimeMillis()).apply()
+            return
+        }
+        val arr = facts.toTypedArray<CharSequence>()
+        val keep = BooleanArray(arr.size) { true }
+        AlertDialog.Builder(this)
+            .setTitle(if (review) "Monatliche Pruefung: behalten?" else "Gedaechtnis (Haken = behalten)")
+            .setMultiChoiceItems(arr, keep) { _, i, c -> keep[i] = c }
+            .setPositiveButton("Speichern") { _, _ ->
+                val kept = facts.filterIndexed { i, _ -> keep[i] }
+                facts.clear(); facts.addAll(kept); saveFacts()
+                prefs.edit().putLong("review", System.currentTimeMillis()).apply()
+                if (ready && !busy) scope.launch { rebuild() }
+            }
+            .setNegativeButton("Abbrechen", null).show()
+    }
+
+    private fun addFactDialog() {
+        val et = EditText(this).apply { hint = "z.B. Ich heisse Ahmed und arbeite als Lehrer" }
+        AlertDialog.Builder(this).setTitle("Neuer Eintrag").setView(et)
+            .setPositiveButton("Merken") { _, _ ->
+                if (ready && !busy) scope.launch { addFact(et.text.toString()); saveState() }
+            }
+            .setNegativeButton("Abbrechen", null).show()
+    }
+
+    private fun nameDialog() {
+        val et = EditText(this).apply { setText(buddyName) }
+        AlertDialog.Builder(this).setTitle("Name des Partners").setView(et)
+            .setPositiveButton("Speichern") { _, _ ->
+                val n = et.text.toString().trim().take(20)
+                if (n.isNotBlank()) {
+                    buddyName = n
+                    prefs.edit().putString("buddyName", n).apply()
+                    append("[Name: $n]\n", false)
+                    if (ready && !busy) scope.launch { rebuild() }
+                }
+            }
+            .setNegativeButton("Abbrechen", null).show()
+    }
+
     // ---------- Stimme (Android-TextToSpeech, auch ohne Internet) ----------
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -646,7 +776,7 @@ class MainActivity : Activity() {
         if (voiceIdx == 0) { t.stop(); return }
         t.voice = voices[voiceIdx - 1]
         applyRate()
-        if (test) t.speak("Hallo, ich bin Max.", TextToSpeech.QUEUE_FLUSH, null, "test")
+        if (test) t.speak("Hallo, ich bin $buddyName.", TextToSpeech.QUEUE_FLUSH, null, "test")
     }
 
     private fun sayNow(s: String) {
