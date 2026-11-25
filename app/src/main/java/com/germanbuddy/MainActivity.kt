@@ -8,10 +8,14 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
 import android.speech.tts.TextToSpeech
 import android.speech.tts.Voice
 import java.util.Locale
@@ -27,6 +31,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class MainActivity : Activity() {
+    private val appVersion = "3.1"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var engine: Engine? = null
     private var conversation: Conversation? = null
@@ -37,21 +42,32 @@ class MainActivity : Activity() {
     private lateinit var newBtn: Button
     private lateinit var easierBtn: Button
     private lateinit var transBtn: Button
-    private lateinit var explangBox: Spinner
-    private lateinit var levelBox: Spinner
+    private lateinit var playBtn: Button
+    private lateinit var settingsBtn: Button
+    private lateinit var pickBtn: Button
     private lateinit var scroll: ScrollView
     private lateinit var prefs: SharedPreferences
     @Volatile private var stopRec = false
+    @Volatile private var hitMax = false
+    private var lastPcm: ByteArray? = null
     private var recording = false
     private var ready = false
     private var busy = false
     private var level = 1
     private var turns = 0
+    private var explangIdx = 0
+    private var silTenths = 25   // Pause am Ende der Rede in Zehntelsekunden (25 = 2,5 s)
+    private var maxSec = 20      // maximale Aufnahmedauer in Sekunden
+    private var memHours = 24    // Kurzzeit-Gedaechtnis in Stunden
     private val chat = StringBuilder()
     private val history = mutableListOf<Pair<String, String>>()
     private val dayMs = 24L * 60 * 60 * 1000
+    private val memMs get() = memHours * 3_600_000L
     private val levels = listOf("A1", "A2", "B1", "B2", "C1", "C2")
     private val explangs = listOf("Arabisch", "Russisch", "Englisch")
+    private val silOptions = listOf(15, 20, 25, 30, 40)
+    private val maxOptions = listOf(10, 15, 20, 25, 30)
+    private val memOptions = listOf(1, 6, 12, 24, 48, 72)
     private val modelFile get() = File(filesDir, "model.litertlm")
     private val histFile get() = File(filesDir, "history.json")
     private val chatFile get() = File(filesDir, "chat.txt")
@@ -66,7 +82,8 @@ class MainActivity : Activity() {
     )
 
     private fun systemFor(l: Int) =
-        "Du bist $buddyName, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. ${levelRules[l]} " +
+        "Du bist $buddyName, ein freundlicher deutscher Gespraechspartner fuer einen Lernenden. Der Lernende ist der Nutzer; verwechsle nie deinen Namen mit seinem. " +
+        "Dein Name ist $buddyName. Fragt jemand nach deinem Namen, nenne nur diesen Namen und nie Gemma oder Google. ${levelRules[l]} " +
         "Antworte nur mit hoechstens zwei kurzen Saetzen auf dem Niveau des Lernenden und stelle am Ende eine einfache Frage. " +
         "Kommentiere nie die Grammatik und korrigiere nichts. " +
         "Spricht der Lernende nicht Deutsch, antworte nur mit: Bitte auf Deutsch." + factsText()
@@ -80,36 +97,28 @@ class MainActivity : Activity() {
         prefs = getSharedPreferences("buddy", Context.MODE_PRIVATE)
         level = prefs.getInt("level", 1).coerceIn(0, 5)
         buddyName = prefs.getString("buddyName", "Max") ?: "Max"
+        explangIdx = prefs.getInt("explang", 0).coerceIn(0, explangs.size - 1)
+        silTenths = prefs.getInt("silTenths", 25)
+        maxSec = prefs.getInt("maxSec", 20).coerceIn(5, 30)
+        memHours = prefs.getInt("memHours", 24).coerceAtLeast(1)
         loadFacts()
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 48, 24, 24) }
-        val pick = Button(this).apply { text = "Modelldatei waehlen (.litertlm)" }
-        levelBox = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, levels)
-            setSelection(level)
-        }
+        pickBtn = Button(this).apply { text = "Modelldatei waehlen (.litertlm)" }
         newBtn = Button(this).apply { text = "Neu" }
-        voiceBox = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, listOf("Stimme ..."))
-        }
+        playBtn = Button(this).apply { text = "Aufnahme hoeren"; isEnabled = false }
+        settingsBtn = Button(this).apply { text = "Einstellungen" }
         val top = LinearLayout(this).apply {
-            addView(levelBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(voiceBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(newBtn)
+            addView(newBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(playBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
+            addView(settingsBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
         }
         easierBtn = Button(this).apply { text = "Einfacher"; isEnabled = false }
-        explangBox = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, explangs)
-            setSelection(prefs.getInt("explang", 0).coerceIn(0, explangs.size - 1))
-        }
         transBtn = Button(this).apply { text = "Uebersetzen"; isEnabled = false }
         val top2 = LinearLayout(this).apply {
             addView(easierBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-            addView(explangBox, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(transBtn)
         }
-        memBtn = Button(this).apply { text = "Gedaechtnis (0)" }
-        val top3 = LinearLayout(this).apply { addView(memBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)) }
         log = TextView(this).apply { textSize = 16f }
         scroll = ScrollView(this).apply { addView(log) }
         input = EditText(this).apply { hint = "Schreibe oder sprich..." }
@@ -120,42 +129,15 @@ class MainActivity : Activity() {
             addView(mic)
             addView(send)
         }
-        root.addView(pick)
+        root.addView(pickBtn)
         root.addView(top)
         root.addView(top2)
-        root.addView(top3)
         root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
         root.addView(row)
         setContentView(root)
         updateTranslateUi()
         initTts()
 
-        levelBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                if (pos == level) return
-                level = pos
-                prefs.edit().putInt("level", level).apply()
-                updateTranslateUi()
-                applyRate()
-                if (ready && !busy) scope.launch { rebuild(); append("[Niveau ${levels[level]}]\n", false) }
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-        explangBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                prefs.edit().putInt("explang", pos).apply()
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
-        voiceBox.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) {
-                if (!ttsReady || pos == voiceIdx) return
-                voiceIdx = pos
-                prefs.edit().putInt("voice", pos).apply()
-                applyVoice(true)
-            }
-            override fun onNothingSelected(p: AdapterView<*>?) {}
-        }
         newBtn.setOnClickListener {
             if (busy) return@setOnClickListener
             scope.launch {
@@ -165,13 +147,10 @@ class MainActivity : Activity() {
             }
         }
         easierBtn.setOnClickListener { easier() }
-        memBtn.setOnClickListener { memoryMenu() }
-        updateMemBtn()
         transBtn.setOnClickListener { translate() }
-        pick.setOnClickListener {
-            val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
-            startActivityForResult(i, 1)
-        }
+        playBtn.setOnClickListener { playLast() }
+        settingsBtn.setOnClickListener { showSettings() }
+        pickBtn.setOnClickListener { chooseModel() }
         send.setOnClickListener { sendText() }
         mic.setOnClickListener { onMic() }
 
@@ -180,21 +159,108 @@ class MainActivity : Activity() {
         val lastReview = prefs.getLong("review", 0L)
         if (lastReview == 0L) prefs.edit().putLong("review", nowMs).apply()
         else if (nowMs - lastReview > 30L * dayMs && facts.isNotEmpty()) log.post { factsDialog(true) }
-        if (modelFile.exists()) { pick.visibility = View.GONE; loadEngine() }
+        if (modelFile.exists()) { pickBtn.visibility = View.GONE; loadEngine() }
         else append("Waehle zuerst die Modelldatei (Kopieren dauert einige Minuten).\n", false)
     }
 
     private fun updateTranslateUi() {
-        val show = if (level <= 1) View.VISIBLE else View.GONE
-        explangBox.visibility = show
-        transBtn.visibility = show
+        transBtn.visibility = if (level <= 1) View.VISIBLE else View.GONE
     }
 
-    // ---------- Gedaechtnis (24 Stunden) ----------
+    // ---------- Einstellungen ----------
+    private fun lbl(t: String): TextView = TextView(this).apply { text = t; textSize = 14f; setPadding(0, 28, 0, 4) }
+
+    private fun spin(items: List<String>, sel: Int, onPick: (Int) -> Unit): Spinner {
+        val s = Spinner(this)
+        s.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
+        s.setSelection(sel.coerceIn(0, items.size - 1))
+        s.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p: AdapterView<*>?, v: View?, pos: Int, id: Long) { onPick(pos) }
+            override fun onNothingSelected(p: AdapterView<*>?) {}
+        }
+        return s
+    }
+
+    private fun showSettings() {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(40, 16, 40, 16) }
+
+        box.addView(lbl("Niveau"))
+        box.addView(spin(levels, level) { pos ->
+            if (pos != level) {
+                level = pos
+                prefs.edit().putInt("level", level).apply()
+                updateTranslateUi()
+                applyRate()
+                if (ready && !busy) scope.launch { rebuild(); append("[Niveau ${levels[level]}]\n", false) }
+            }
+        })
+
+        box.addView(lbl("Stimme"))
+        val vItems = if (ttsReady) listOf("Stimme aus") + voices.indices.map { "Stimme ${it + 1}" } else listOf("Keine Stimme")
+        box.addView(spin(vItems, if (ttsReady) voiceIdx else 0) { pos ->
+            if (ttsReady && pos != voiceIdx) {
+                voiceIdx = pos
+                prefs.edit().putInt("voice", pos).apply()
+                applyVoice(true)
+            }
+        })
+
+        box.addView(lbl("Pause am Ende der Rede (Sekunden)"))
+        val silSel = silOptions.indexOf(silTenths).let { if (it < 0) 2 else it }
+        box.addView(spin(silOptions.map { (it / 10.0).toString().removeSuffix(".0") }, silSel) { pos ->
+            silTenths = silOptions[pos]
+            prefs.edit().putInt("silTenths", silTenths).apply()
+        })
+
+        box.addView(lbl("Maximale Aufnahme (Sekunden)"))
+        val maxSel = maxOptions.indexOf(maxSec).let { if (it < 0) 2 else it }
+        box.addView(spin(maxOptions.map { it.toString() }, maxSel) { pos ->
+            maxSec = maxOptions[pos]
+            prefs.edit().putInt("maxSec", maxSec).apply()
+        })
+
+        box.addView(lbl("Kurzzeit-Gedaechtnis loeschen nach (Stunden)"))
+        val memSel = memOptions.indexOf(memHours).let { if (it < 0) 3 else it }
+        box.addView(spin(memOptions.map { it.toString() }, memSel) { pos ->
+            memHours = memOptions[pos]
+            prefs.edit().putInt("memHours", memHours).apply()
+        })
+
+        box.addView(lbl("Uebersetzung in (nur A1/A2)"))
+        box.addView(spin(explangs, explangIdx) { pos ->
+            explangIdx = pos
+            prefs.edit().putInt("explang", pos).apply()
+        })
+
+        box.addView(lbl("Gedaechtnis und Name des Partners"))
+        val mem = Button(this).apply { text = "Gedaechtnis (${facts.size})" }
+        mem.setOnClickListener { memoryMenu() }
+        memBtn = mem
+        box.addView(mem)
+
+        box.addView(lbl("Modell"))
+        val curName = (prefs.getString("modelName", "") ?: "").ifBlank { "model.litertlm" }
+        val info = TextView(this)
+        info.text = if (modelFile.exists())
+            "Aktuell: $curName (${modelFile.length() shr 20} MB)\nFreier Speicher: ${filesDir.usableSpace shr 30} GB"
+        else "Kein Modell vorhanden"
+        box.addView(info)
+        val pickModel = Button(this).apply { text = "Modell waehlen (.litertlm)" }
+        pickModel.setOnClickListener { chooseModel() }
+        box.addView(pickModel)
+
+        box.addView(lbl("Version $appVersion"))
+
+        val sv = ScrollView(this).apply { addView(box) }
+        AlertDialog.Builder(this).setTitle("Einstellungen").setView(sv)
+            .setPositiveButton("Schliessen", null).show()
+    }
+
+    // ---------- Gedaechtnis (Kurzzeit) ----------
     private fun restoreState() {
         val last = prefs.getLong("last", 0L)
         if (last == 0L) return
-        if (System.currentTimeMillis() - last > dayMs) { wipeFiles(); return }
+        if (System.currentTimeMillis() - last > memMs) { wipeFiles(); return }
         try {
             if (chatFile.exists()) { chat.append(chatFile.readText()); log.text = chat.toString() }
             if (histFile.exists()) {
@@ -229,7 +295,7 @@ class MainActivity : Activity() {
 
     private suspend fun checkExpiry() {
         val last = prefs.getLong("last", 0L)
-        if (last != 0L && System.currentTimeMillis() - last > dayMs) {
+        if (last != 0L && System.currentTimeMillis() - last > memMs) {
             clearMemory()
             rebuild()
         }
@@ -242,19 +308,87 @@ class MainActivity : Activity() {
     }
 
     // ---------- Modell ----------
+    private fun chooseModel() {
+        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply { addCategory(Intent.CATEGORY_OPENABLE); type = "*/*" }
+        startActivityForResult(i, 1)
+    }
+
+    private fun fileInfo(uri: Uri): Pair<String, Long> {
+        var name = ""
+        var size = -1L
+        try {
+            contentResolver.query(uri, null, null, null, null)?.use { c ->
+                if (c.moveToFirst()) {
+                    val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val si = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (ni >= 0) name = c.getString(ni) ?: ""
+                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                }
+            }
+        } catch (e: Throwable) { }
+        return name to size
+    }
+
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
+        if (req != 1 || res != Activity.RESULT_OK) return
         val uri = data?.data ?: return
+        val info = fileInfo(uri)
+        val name = info.first
+        val size = info.second
+        if (busy) {
+            append("[Bitte warten, bis die aktuelle Aufgabe fertig ist.]\n", false)
+            return
+        }
+        if (name.isNotBlank() && !name.endsWith(".litertlm", ignoreCase = true)) {
+            append("[Das ist keine .litertlm-Datei: $name]\n", false)
+            return
+        }
+        val free = filesDir.usableSpace
+        if (size > 0 && free < size + (300L shl 20)) {
+            append("[Zu wenig freier Speicher: frei ${free shr 30} GB, noetig ca. ${(size shr 30) + 1} GB.]\n", false)
+            return
+        }
+        if (modelFile.exists()) {
+            val what = if (name.isBlank()) "die neue Datei" else name
+            AlertDialog.Builder(this).setTitle("Modell ersetzen?")
+                .setMessage("Das aktuelle Modell wird nach dem Kopieren geloescht und durch $what ersetzt.")
+                .setPositiveButton("Ersetzen") { _, _ -> replaceModel(uri, name) }
+                .setNegativeButton("Abbrechen", null).show()
+        } else {
+            replaceModel(uri, name)
+        }
+    }
+
+    private fun replaceModel(uri: Uri, name: String) {
         scope.launch {
+            ready = false
+            setBusy(true)
+            val tmp = File(filesDir, "model_tmp.litertlm")
             try {
-                append("Kopiere Modell ... bitte warten.\n", false)
+                append("Kopiere Modell ... bitte warten (einige Minuten).\n", false)
                 withContext(Dispatchers.IO) {
                     contentResolver.openInputStream(uri)!!.use { i ->
-                        modelFile.outputStream().use { o -> i.copyTo(o, 1 shl 20) }
+                        tmp.outputStream().use { o -> i.copyTo(o, 1 shl 20) }
                     }
                 }
+                withContext(Dispatchers.Default) {
+                    try { conversation?.close() } catch (x: Throwable) { }
+                    conversation = null
+                    try { engine?.close() } catch (x: Throwable) { }
+                    engine = null
+                    modelFile.delete()
+                    if (!tmp.renameTo(modelFile)) throw RuntimeException("Umbenennen fehlgeschlagen")
+                }
+                prefs.edit().putString("modelName", name).apply()
+                pickBtn.visibility = View.GONE
                 loadEngine()
-            } catch (t: Throwable) { append("Fehler beim Kopieren: ${t.message}\n", false) }
+            } catch (t: Throwable) {
+                tmp.delete()
+                append("Fehler beim Kopieren: ${t.message}\n", false)
+                ready = engine != null
+                setBusy(false)
+            }
         }
     }
 
@@ -294,7 +428,10 @@ class MainActivity : Activity() {
                 ready = true
                 setBusy(false)
                 append("Bereit. Schreibe oder druecke Sprechen.\n", false)
-            } catch (t: Throwable) { append("Fehler: ${t.message}\n", false) }
+            } catch (t: Throwable) {
+                append("Fehler: ${t.message}\n", false)
+                setBusy(false)
+            }
         }
     }
 
@@ -302,11 +439,11 @@ class MainActivity : Activity() {
         busy = b
         send.isEnabled = ready && !b
         mic.isEnabled = ready && (!b || recording)
-        levelBox.isEnabled = !b
         newBtn.isEnabled = !b
         easierBtn.isEnabled = ready && !b
         transBtn.isEnabled = ready && !b
-        explangBox.isEnabled = !b
+        settingsBtn.isEnabled = !b
+        playBtn.isEnabled = !b && lastPcm != null
     }
 
     private suspend fun ask(contents: Contents): String {
@@ -409,7 +546,8 @@ class MainActivity : Activity() {
 
     private fun diffMarker(orig: String, corr: String, speech: Boolean): String {
         if (corr.isBlank()) return ""
-        if (words(orig, speech) == words(corr, speech)) return "[OK: keine Aenderung]\n"
+        // ß und ss gelten als gleich (das Hoeren schreibt oft ss)
+        if (words(orig.replace("ß", "ss"), speech) == words(corr.replace("ß", "ss"), speech)) return "[OK: keine Aenderung]\n"
         val a = words(norm(orig), speech)
         val b = words(norm(corr), speech)
         if (a == b) return "[OK: umgangssprachlich richtig]\n"
@@ -429,7 +567,7 @@ class MainActivity : Activity() {
     // ---------- Schritt 2: Korrektur (eigene Konversation, nur diese Aufgabe) ----------
     private suspend fun correct(text: String): String {
         val out = oneShot("Du bist ein Korrekturprogramm fuer Deutsch.",
-            Contents.of("Korrigiere nur diesen Satz und gib nur den korrigierten Satz aus: $text"), 120, 0.1)
+            Contents.of("Korrigiere nur diesen Satz und gib nur den korrigierten Satz aus. Aendere keine Woerter, die schon richtig sind: $text"), 120, 0.1)
         return cleanLine(out)
     }
 
@@ -494,7 +632,7 @@ class MainActivity : Activity() {
         val last = history.lastOrNull()
         if (last == null) { append("[Noch nichts da]\n", false); return }
         if (busy || !ready) return
-        val lang = explangs[explangBox.selectedItemPosition]
+        val lang = explangs[explangIdx]
         val adj = lang.removeSuffix("isch") + "ische"
         val ans = answerOf(last.second)
         setBusy(true)
@@ -547,6 +685,10 @@ class MainActivity : Activity() {
                 setBusy(false)
                 return@launch
             }
+            lastPcm = pcm
+            val secs = String.format(Locale.US, "%.1f", pcm.size / 32000.0)
+            val maxNote = if (hitMax) " - Maximum erreicht, der Rest wurde abgeschnitten!" else ""
+            append("[Aufnahme: $secs s$maxNote]\n", false)
             checkExpiry()
             append("[Ich verstehe ...]\n", false)
             val w = wav(pcm)
@@ -568,6 +710,38 @@ class MainActivity : Activity() {
         }
     }
 
+    // ---------- Eigene Aufnahme abspielen ----------
+    private fun playLast() {
+        val pcm = lastPcm
+        if (pcm == null) { append("[Noch keine Aufnahme]\n", false); return }
+        if (busy || recording) return
+        tts?.stop(); speakBuf.setLength(0)
+        setBusy(true)
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                try {
+                    val track = AudioTrack.Builder()
+                        .setAudioAttributes(AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                        .setAudioFormat(AudioFormat.Builder()
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .setSampleRate(16000)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                        .setBufferSizeInBytes(pcm.size)
+                        .setTransferMode(AudioTrack.MODE_STATIC)
+                        .build()
+                    track.write(pcm, 0, pcm.size)
+                    track.play()
+                    Thread.sleep(pcm.size / 32L + 400L)
+                    track.stop()
+                    track.release()
+                } catch (t: Throwable) { }
+            }
+            setBusy(false)
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private fun record(): ByteArray? {
         val rate = 16000
@@ -576,14 +750,17 @@ class MainActivity : Activity() {
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, 16000))
         val out = ByteArrayOutputStream()
         val buf = ShortArray(1600)
+        val silBlocks = silTenths          // 1 Block = 0,1 Sekunde
+        val maxBlocks = maxSec * 10
         var speech = false
         var quiet = 0
         var blocks = 0
         var noise = 1.0e9
         var threshold = 900.0
+        hitMax = false
         rec.startRecording()
         try {
-            while (!stopRec && blocks < 150) {
+            while (!stopRec && blocks < maxBlocks) {
                 val n = rec.read(buf, 0, buf.size)
                 if (n <= 0) continue
                 var sum = 0.0
@@ -597,9 +774,10 @@ class MainActivity : Activity() {
                     noise = minOf(noise, rms)
                     if (blocks == 5) threshold = (noise * 3.0).coerceIn(150.0, 1500.0)
                 } else if (rms > threshold) { speech = true; quiet = 0 } else if (speech) quiet++
-                if (speech && quiet >= 17) break
+                if (speech && quiet >= silBlocks) break
             }
         } finally { rec.stop(); rec.release() }
+        hitMax = blocks >= maxBlocks && !stopRec
         return if (speech) out.toByteArray() else null
     }
 
@@ -622,7 +800,7 @@ class MainActivity : Activity() {
     private var buddyName = "Max"
     private val facts = mutableListOf<String>()
     private val factsFile get() = File(filesDir, "facts.json")
-    private lateinit var memBtn: Button
+    private var memBtn: Button? = null
     private val rememberRe = Regex("^\\s*(merke dir|merk dir)\\s*[:,]?\\s*(.+)$", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
     private val forgetRe = Regex("^\\s*(vergiss)\\s*[:,]?\\s*(.+)$", setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL))
 
@@ -650,7 +828,7 @@ class MainActivity : Activity() {
         updateMemBtn()
     }
 
-    private fun updateMemBtn() { memBtn.text = "Gedaechtnis (${facts.size})" }
+    private fun updateMemBtn() { memBtn?.text = "Gedaechtnis (${facts.size})" }
 
     private suspend fun addFact(f: String) {
         val t = f.trim().take(120)
@@ -740,7 +918,6 @@ class MainActivity : Activity() {
     private var voices: List<Voice> = emptyList()
     private var voiceIdx = 0
     private val speakBuf = StringBuilder()
-    private lateinit var voiceBox: Spinner
 
     private fun initTts() {
         tts = TextToSpeech(this) { status ->
@@ -754,15 +931,11 @@ class MainActivity : Activity() {
                 t.voices.filter { it.locale.language == "de" && !it.isNetworkConnectionRequired }.sortedBy { it.name }
             } catch (e: Throwable) { emptyList() }
             if (voices.isEmpty()) {
-                voiceBox.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, listOf("Keine Stimme"))
                 append("[Keine deutsche Stimme ohne Internet gefunden. Einstellungen > Text-in-Sprache: Deutsch installieren]\n", false)
                 return@TextToSpeech
             }
             ttsReady = true
-            val items = listOf("Stimme aus") + voices.indices.map { "Stimme ${it + 1}" }
             voiceIdx = prefs.getInt("voice", 1).coerceIn(0, voices.size)
-            voiceBox.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, items)
-            voiceBox.setSelection(voiceIdx)
             applyVoice(false)
         }
     }
