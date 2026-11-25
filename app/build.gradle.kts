@@ -10,7 +10,7 @@ android {
         minSdk = 28
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1"
+        versionName = "3.1"
     }
     signingConfigs {
         create("buddy") {
@@ -42,6 +42,6 @@ kotlin {
     }
 }
 dependencies {
-    implementation("com.google.ai.edge.litertlm:litertlm-android:latest.release")
+    implementation("com.google.ai.edge.litertlm:litertlm-android:0.18.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
