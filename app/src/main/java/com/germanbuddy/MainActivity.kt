@@ -31,7 +31,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class MainActivity : Activity() {
-    private val appVersion = "3.1"
+    private val appVersion = "3.2"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var engine: Engine? = null
     private var conversation: Conversation? = null
@@ -68,6 +68,15 @@ class MainActivity : Activity() {
     private val silOptions = listOf(15, 20, 25, 30, 40)
     private val maxOptions = listOf(10, 15, 20, 25, 30)
     private val memOptions = listOf(1, 6, 12, 24, 48, 72)
+    private var micIdx = 0
+    private var autoGain = true
+    private val micOptions = listOf(
+        MediaRecorder.AudioSource.MIC,
+        MediaRecorder.AudioSource.VOICE_RECOGNITION,
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+        MediaRecorder.AudioSource.CAMCORDER,
+        MediaRecorder.AudioSource.UNPROCESSED)
+    private val micNames = listOf("Standard", "Spracherkennung", "Sprachkommunikation", "Kamera", "Unbearbeitet")
     private val modelFile get() = File(filesDir, "model.litertlm")
     private val histFile get() = File(filesDir, "history.json")
     private val chatFile get() = File(filesDir, "chat.txt")
@@ -101,12 +110,14 @@ class MainActivity : Activity() {
         silTenths = prefs.getInt("silTenths", 25)
         maxSec = prefs.getInt("maxSec", 20).coerceIn(5, 30)
         memHours = prefs.getInt("memHours", 24).coerceAtLeast(1)
+        micIdx = prefs.getInt("micIdx", 0).coerceIn(0, micOptions.size - 1)
+        autoGain = prefs.getBoolean("autoGain", true)
         loadFacts()
 
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 48, 24, 24) }
-        pickBtn = Button(this).apply { text = "Modelldatei waehlen (.litertlm)" }
+        pickBtn = Button(this).apply { text = "Modelldatei wГ¤hlen (.litertlm)" }
         newBtn = Button(this).apply { text = "Neu" }
-        playBtn = Button(this).apply { text = "Aufnahme hoeren"; isEnabled = false }
+        playBtn = Button(this).apply { text = "Aufnahme hГ¶ren"; isEnabled = false }
         settingsBtn = Button(this).apply { text = "Einstellungen" }
         val top = LinearLayout(this).apply {
             addView(newBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -114,7 +125,7 @@ class MainActivity : Activity() {
             addView(settingsBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 2f))
         }
         easierBtn = Button(this).apply { text = "Einfacher"; isEnabled = false }
-        transBtn = Button(this).apply { text = "Uebersetzen"; isEnabled = false }
+        transBtn = Button(this).apply { text = "Гњbersetzen"; isEnabled = false }
         val top2 = LinearLayout(this).apply {
             addView(easierBtn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
             addView(transBtn)
@@ -143,7 +154,7 @@ class MainActivity : Activity() {
             scope.launch {
                 clearMemory()
                 if (ready) rebuild()
-                append("[Neues Gespraech]\n", false)
+                append("[Neues GesprГ¤ch]\n", false)
             }
         }
         easierBtn.setOnClickListener { easier() }
@@ -160,7 +171,7 @@ class MainActivity : Activity() {
         if (lastReview == 0L) prefs.edit().putLong("review", nowMs).apply()
         else if (nowMs - lastReview > 30L * dayMs && facts.isNotEmpty()) log.post { factsDialog(true) }
         if (modelFile.exists()) { pickBtn.visibility = View.GONE; loadEngine() }
-        else append("Waehle zuerst die Modelldatei (Kopieren dauert einige Minuten).\n", false)
+        else append("WГ¤hle zuerst die Modelldatei (Kopieren dauert einige Minuten).\n", false)
     }
 
     private fun updateTranslateUi() {
@@ -219,21 +230,33 @@ class MainActivity : Activity() {
             prefs.edit().putInt("maxSec", maxSec).apply()
         })
 
-        box.addView(lbl("Kurzzeit-Gedaechtnis loeschen nach (Stunden)"))
+        box.addView(lbl("Kurzzeit-GedГ¤chtnis lГ¶schen nach (Stunden)"))
         val memSel = memOptions.indexOf(memHours).let { if (it < 0) 3 else it }
         box.addView(spin(memOptions.map { it.toString() }, memSel) { pos ->
             memHours = memOptions[pos]
             prefs.edit().putInt("memHours", memHours).apply()
         })
 
-        box.addView(lbl("Uebersetzung in (nur A1/A2)"))
+        box.addView(lbl("Mikrofon-Quelle (Test mit Aufnahme hГ¶ren)"))
+        box.addView(spin(micNames, micIdx) { pos ->
+            micIdx = pos
+            prefs.edit().putInt("micIdx", micIdx).apply()
+        })
+
+        box.addView(lbl("LautstГ¤rke automatisch anheben"))
+        box.addView(spin(listOf("an", "aus"), if (autoGain) 0 else 1) { pos ->
+            autoGain = (pos == 0)
+            prefs.edit().putBoolean("autoGain", autoGain).apply()
+        })
+
+        box.addView(lbl("Гњbersetzung in (nur A1/A2)"))
         box.addView(spin(explangs, explangIdx) { pos ->
             explangIdx = pos
             prefs.edit().putInt("explang", pos).apply()
         })
 
-        box.addView(lbl("Gedaechtnis und Name des Partners"))
-        val mem = Button(this).apply { text = "Gedaechtnis (${facts.size})" }
+        box.addView(lbl("GedГ¤chtnis und Name des Partners"))
+        val mem = Button(this).apply { text = "GedГ¤chtnis (${facts.size})" }
         mem.setOnClickListener { memoryMenu() }
         memBtn = mem
         box.addView(mem)
@@ -245,7 +268,7 @@ class MainActivity : Activity() {
             "Aktuell: $curName (${modelFile.length() shr 20} MB)\nFreier Speicher: ${filesDir.usableSpace shr 30} GB"
         else "Kein Modell vorhanden"
         box.addView(info)
-        val pickModel = Button(this).apply { text = "Modell waehlen (.litertlm)" }
+        val pickModel = Button(this).apply { text = "Modell wГ¤hlen (.litertlm)" }
         pickModel.setOnClickListener { chooseModel() }
         box.addView(pickModel)
 
@@ -253,7 +276,7 @@ class MainActivity : Activity() {
 
         val sv = ScrollView(this).apply { addView(box) }
         AlertDialog.Builder(this).setTitle("Einstellungen").setView(sv)
-            .setPositiveButton("Schliessen", null).show()
+            .setPositiveButton("SchlieГџen", null).show()
     }
 
     // ---------- Gedaechtnis (Kurzzeit) ----------
@@ -346,13 +369,13 @@ class MainActivity : Activity() {
         }
         val free = filesDir.usableSpace
         if (size > 0 && free < size + (300L shl 20)) {
-            append("[Zu wenig freier Speicher: frei ${free shr 30} GB, noetig ca. ${(size shr 30) + 1} GB.]\n", false)
+            append("[Zu wenig freier Speicher: frei ${free shr 30} GB, nГ¶tig ca. ${(size shr 30) + 1} GB.]\n", false)
             return
         }
         if (modelFile.exists()) {
             val what = if (name.isBlank()) "die neue Datei" else name
             AlertDialog.Builder(this).setTitle("Modell ersetzen?")
-                .setMessage("Das aktuelle Modell wird nach dem Kopieren geloescht und durch $what ersetzt.")
+                .setMessage("Das aktuelle Modell wird nach dem Kopieren gelГ¶scht und durch $what ersetzt.")
                 .setPositiveButton("Ersetzen") { _, _ -> replaceModel(uri, name) }
                 .setNegativeButton("Abbrechen", null).show()
         } else {
@@ -427,7 +450,7 @@ class MainActivity : Activity() {
                 }
                 ready = true
                 setBusy(false)
-                append("Bereit. Schreibe oder druecke Sprechen.\n", false)
+                append("Bereit. Schreibe oder drГјcke Sprechen.\n", false)
             } catch (t: Throwable) {
                 append("Fehler: ${t.message}\n", false)
                 setBusy(false)
@@ -458,7 +481,7 @@ class MainActivity : Activity() {
             } catch (t: Throwable) {
                 if (attempt == 2) { append("\n[Fehler: ${t.message}. Bitte App neu starten.]", false); return "" }
                 speakBuf.setLength(0); tts?.stop()
-                append("\n[Gespraech wird neu aufgebaut ...]\n$buddyName: ", false)
+                append("\n[GesprГ¤ch wird neu aufgebaut ...]\n$buddyName: ", false)
                 rebuild()
             }
         }
@@ -546,8 +569,8 @@ class MainActivity : Activity() {
 
     private fun diffMarker(orig: String, corr: String, speech: Boolean): String {
         if (corr.isBlank()) return ""
-        // ß und ss gelten als gleich (das Hoeren schreibt oft ss)
-        if (words(orig.replace("ß", "ss"), speech) == words(corr.replace("ß", "ss"), speech)) return "[OK: keine Aenderung]\n"
+        // Гџ und ss gelten als gleich (das Hoeren schreibt oft ss)
+        if (words(orig.replace("Гџ", "ss"), speech) == words(corr.replace("Гџ", "ss"), speech)) return "[OK: keine Г„nderung]\n"
         val a = words(norm(orig), speech)
         val b = words(norm(corr), speech)
         if (a == b) return "[OK: umgangssprachlich richtig]\n"
@@ -555,13 +578,13 @@ class MainActivity : Activity() {
         if (a2 == b) return "[OK: umgangssprachlich richtig]\n"
         val removed = a.toMutableList().also { l -> b.forEach { l.remove(it) } }
         val added = b.toMutableList().also { l -> a.forEach { l.remove(it) } }
-        if (removed.isEmpty() && added.isEmpty()) return "[Aenderung: nur Wortstellung]\n"
+        if (removed.isEmpty() && added.isEmpty()) return "[Г„nderung: nur Wortstellung]\n"
         val commonA = a.toMutableList().also { l -> removed.forEach { l.remove(it) } }
         val commonB = b.toMutableList().also { l -> added.forEach { l.remove(it) } }
         val order = if (commonA != commonB) "; auch Wortstellung" else ""
         val r = if (removed.isEmpty()) "-" else removed.joinToString(" ")
         val n = if (added.isEmpty()) "-" else added.joinToString(" ")
-        return "[Aenderung: $r  ->  $n$order]\n"
+        return "[Г„nderung: $r  ->  $n$order]\n"
     }
 
     // ---------- Schritt 2: Korrektur (eigene Konversation, nur diese Aufgabe) ----------
@@ -582,7 +605,7 @@ class MainActivity : Activity() {
         val c = correct(text)
         var corrected = text
         if (c.isBlank() || c.lowercase().startsWith("richtig")) {
-            append("[Korrektur nicht moeglich]\n", false)
+            append("[Korrektur nicht mГ¶glich]\n", false)
         } else {
             corrected = c
             append("Korrektur: $corrected\n")
@@ -637,7 +660,7 @@ class MainActivity : Activity() {
         val ans = answerOf(last.second)
         setBusy(true)
         scope.launch {
-            append("\n[Uebersetzung: $lang]\n")
+            append("\n[Гњbersetzung: $lang]\n")
             val out = oneShot("Du bist ein Uebersetzer.",
                 Contents.of("Uebersetze ins $adj. Gib nur die Uebersetzung aus: $ans"), 150, 0.1)
             append(stripQuotes(out) + "\n")
@@ -674,24 +697,27 @@ class MainActivity : Activity() {
         stopRec = false
         mic.text = "Stopp"
         setBusy(true)
-        append("\n[Ich hoere zu ...]\n", false)
+        append("\n[Ich hГ¶re zu ...]\n", false)
         scope.launch {
             val pcm = withContext(Dispatchers.IO) { record() }
             recording = false
             mic.text = "Sprechen"
             setBusy(true)
             if (pcm == null) {
-                append("Nichts gehoert. Versuche es nochmal.\n", false)
+                append("Nichts gehГ¶rt. Versuche es nochmal.\n", false)
                 setBusy(false)
                 return@launch
             }
-            lastPcm = pcm
-            val secs = String.format(Locale.US, "%.1f", pcm.size / 32000.0)
+            val tri = normalize(pcm, autoGain)
+            val snd = tri.first
+            lastPcm = snd
+            val secs = String.format(Locale.US, "%.1f", snd.size / 32000.0)
+            val lvl = if (tri.second == tri.third) "Pegel ${tri.second}%" else "Pegel ${tri.second}% -> ${tri.third}%"
             val maxNote = if (hitMax) " - Maximum erreicht, der Rest wurde abgeschnitten!" else ""
-            append("[Aufnahme: $secs s$maxNote]\n", false)
+            append("[Aufnahme: $secs s, $lvl$maxNote]\n", false)
             checkExpiry()
             append("[Ich verstehe ...]\n", false)
-            val w = wav(pcm)
+            val w = wav(snd)
             var heard = extractTagged(oneShot(transcribeSystem, Contents.of(Content.AudioBytes(w)), 150, 0.1))
             if (heard.isBlank()) {
                 heard = extractTagged(oneShot(transcribeSystem,
@@ -742,12 +768,50 @@ class MainActivity : Activity() {
         }
     }
 
+    // Lautstaerke anheben: Spitze (99,9 %-Perzentil) auf ca. 80 % bringen, Verstaerkung hoechstens 8-fach
+    private fun normalize(pcm: ByteArray, apply: Boolean): Triple<ByteArray, Int, Int> {
+        val n = pcm.size / 2
+        if (n == 0) return Triple(pcm, 0, 0)
+        val bb = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN)
+        val hist = IntArray(32769)
+        for (i in 0 until n) {
+            val v = Math.abs(bb.getShort(i * 2).toInt())
+            hist[if (v > 32768) 32768 else v]++
+        }
+        val limit = (n * 0.999).toInt()
+        var acc = 0
+        var peak = 1
+        for (v in 0..32768) {
+            acc += hist[v]
+            if (acc >= limit) { peak = v; break }
+        }
+        if (peak < 1) peak = 1
+        val before = peak * 100 / 32768
+        if (!apply) return Triple(pcm, before, before)
+        val gain = minOf(8.0, 0.8 * 32767.0 / peak)
+        if (gain < 1.1) return Triple(pcm, before, before)
+        val out = ByteBuffer.allocate(pcm.size).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until n) {
+            var x = (bb.getShort(i * 2) * gain).toInt()
+            if (x > 32767) x = 32767
+            if (x < -32768) x = -32768
+            out.putShort(x.toShort())
+        }
+        val after = minOf(100, (peak * gain).toInt() * 100 / 32768)
+        return Triple(out.array(), before, after)
+    }
+
     @SuppressLint("MissingPermission")
     private fun record(): ByteArray? {
         val rate = 16000
         val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val rec = AudioRecord(MediaRecorder.AudioSource.MIC, rate,
+        var rec = AudioRecord(micOptions[micIdx], rate,
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, 16000))
+        if (rec.state != AudioRecord.STATE_INITIALIZED) {
+            rec.release()
+            rec = AudioRecord(MediaRecorder.AudioSource.MIC, rate,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, 16000))
+        }
         val out = ByteArrayOutputStream()
         val buf = ShortArray(1600)
         val silBlocks = silTenths          // 1 Block = 0,1 Sekunde
@@ -828,12 +892,12 @@ class MainActivity : Activity() {
         updateMemBtn()
     }
 
-    private fun updateMemBtn() { memBtn?.text = "Gedaechtnis (${facts.size})" }
+    private fun updateMemBtn() { memBtn?.text = "GedГ¤chtnis (${facts.size})" }
 
     private suspend fun addFact(f: String) {
         val t = f.trim().take(120)
         if (t.isBlank()) return
-        if (facts.size >= 20) { append("[Gedaechtnis voll (20). Loesche zuerst etwas.]\n"); return }
+        if (facts.size >= 20) { append("[GedГ¤chtnis voll (20). LГ¶sche zuerst etwas.]\n"); return }
         facts.add(t)
         saveFacts()
         append("[Gemerkt: $t]\n")
@@ -858,26 +922,26 @@ class MainActivity : Activity() {
 
     private fun memoryMenu() {
         val items = arrayOf<CharSequence>(
-            "Eintraege ansehen / loeschen (${facts.size})",
-            "Neuen Eintrag hinzufuegen",
-            "Name des Partners aendern ($buddyName)")
-        AlertDialog.Builder(this).setTitle("Gedaechtnis")
+            "EintrГ¤ge ansehen / lГ¶schen (${facts.size})",
+            "Neuen Eintrag hinzufГјgen",
+            "Name des Partners Г¤ndern ($buddyName)")
+        AlertDialog.Builder(this).setTitle("GedГ¤chtnis")
             .setItems(items) { _, w ->
                 when (w) { 0 -> factsDialog(false); 1 -> addFactDialog(); else -> nameDialog() }
             }
-            .setNegativeButton("Schliessen", null).show()
+            .setNegativeButton("SchlieГџen", null).show()
     }
 
     private fun factsDialog(review: Boolean) {
         if (facts.isEmpty()) {
-            Toast.makeText(this, "Das Gedaechtnis ist leer", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Das GedГ¤chtnis ist leer", Toast.LENGTH_SHORT).show()
             if (review) prefs.edit().putLong("review", System.currentTimeMillis()).apply()
             return
         }
         val arr = facts.toTypedArray<CharSequence>()
         val keep = BooleanArray(arr.size) { true }
         AlertDialog.Builder(this)
-            .setTitle(if (review) "Monatliche Pruefung: behalten?" else "Gedaechtnis (Haken = behalten)")
+            .setTitle(if (review) "Monatliche PrГјfung: behalten?" else "GedГ¤chtnis (Haken = behalten)")
             .setMultiChoiceItems(arr, keep) { _, i, c -> keep[i] = c }
             .setPositiveButton("Speichern") { _, _ ->
                 val kept = facts.filterIndexed { i, _ -> keep[i] }
@@ -889,7 +953,7 @@ class MainActivity : Activity() {
     }
 
     private fun addFactDialog() {
-        val et = EditText(this).apply { hint = "z.B. Ich heisse Ahmed und arbeite als Lehrer" }
+        val et = EditText(this).apply { hint = "z.B. Ich heiГџe Ahmed und arbeite als Lehrer" }
         AlertDialog.Builder(this).setTitle("Neuer Eintrag").setView(et)
             .setPositiveButton("Merken") { _, _ ->
                 if (ready && !busy) scope.launch { addFact(et.text.toString()); saveState() }
@@ -923,7 +987,7 @@ class MainActivity : Activity() {
         tts = TextToSpeech(this) { status ->
             val t = tts
             if (status != TextToSpeech.SUCCESS || t == null) {
-                append("[Keine Sprachausgabe verfuegbar]\n", false)
+                append("[Keine Sprachausgabe verfГјgbar]\n", false)
                 return@TextToSpeech
             }
             t.setLanguage(Locale.GERMANY)
