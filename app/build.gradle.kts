@@ -10,7 +10,7 @@ android {
         minSdk = 28
         targetSdk = 34
         versionCode = 1
-        versionName = "3.1"
+        versionName = "3.3"
     }
     signingConfigs {
         create("buddy") {
