@@ -31,7 +31,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class MainActivity : Activity() {
-    private val appVersion = "3.2"
+    private val appVersion = "3.3"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var engine: Engine? = null
     private var conversation: Conversation? = null
@@ -70,6 +70,8 @@ class MainActivity : Activity() {
     private val memOptions = listOf(1, 6, 12, 24, 48, 72)
     private var micIdx = 0
     private var autoGain = true
+    private var lastCorrMs = 0L
+    private var lastReplyMs = 0L
     private val micOptions = listOf(
         MediaRecorder.AudioSource.MIC,
         MediaRecorder.AudioSource.VOICE_RECOGNITION,
@@ -596,13 +598,17 @@ class MainActivity : Activity() {
 
     // ---------- Ein Gespraechsschritt: Korrektur, dann Antwort ----------
     private suspend fun converse(text: String, speech: Boolean) {
+        lastCorrMs = 0L
+        lastReplyMs = 0L
         rememberRe.find(text)?.let { addFact(it.groupValues[2].trim().trimEnd('.')); return }
         forgetRe.find(text)?.let { forgetFact(it.groupValues[2].trim().trimEnd('.')); return }
         if (notGerman(text)) {
             append("$buddyName: Bitte auf Deutsch.\n")
             return
         }
+        val tc0 = System.currentTimeMillis()
         val c = correct(text)
+        lastCorrMs = System.currentTimeMillis() - tc0
         var corrected = text
         if (c.isBlank() || c.lowercase().startsWith("richtig")) {
             append("[Korrektur nicht m\u00f6glich]\n", false)
@@ -612,9 +618,19 @@ class MainActivity : Activity() {
             append(diffMarker(text, corrected, speech))
         }
         append("$buddyName: ")
+        val tr0 = System.currentTimeMillis()
         val reply = ask(Contents.of(corrected))
+        lastReplyMs = System.currentTimeMillis() - tr0
         append("\n")
         remember(corrected, reply)
+    }
+
+    private fun sec(ms: Long): String = String.format(Locale.US, "%.1f", ms / 1000.0)
+
+    private fun timeLine(hearMs: Long, totalMs: Long): String {
+        if (lastCorrMs == 0L && lastReplyMs == 0L) return ""
+        val h = if (hearMs > 0L) "H\u00f6ren ${sec(hearMs)} s, " else ""
+        return "[Zeit: ${h}Korrektur ${sec(lastCorrMs)} s, Antwort ${sec(lastReplyMs)} s, gesamt ${sec(totalMs)} s | Modell ${modelFile.length() shr 20} MB]\n"
     }
 
     private fun sendText() {
@@ -623,9 +639,11 @@ class MainActivity : Activity() {
         input.setText("")
         setBusy(true)
         scope.launch {
+            val t0 = System.currentTimeMillis()
             checkExpiry()
             append("\nDu: $text\n")
             converse(text, false)
+            append(timeLine(0L, System.currentTimeMillis() - t0), false)
             saveState()
             setBusy(false)
         }
@@ -708,6 +726,7 @@ class MainActivity : Activity() {
                 setBusy(false)
                 return@launch
             }
+            val t0 = System.currentTimeMillis()
             val tri = normalize(pcm, autoGain)
             val snd = tri.first
             lastPcm = snd
@@ -729,8 +748,10 @@ class MainActivity : Activity() {
                 setBusy(false)
                 return@launch
             }
+            val tHear = System.currentTimeMillis() - t0
             append("Verstanden: $heard\n")
             converse(heard, true)
+            append(timeLine(tHear, System.currentTimeMillis() - t0), false)
             saveState()
             setBusy(false)
         }
